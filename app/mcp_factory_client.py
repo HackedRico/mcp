@@ -5,16 +5,44 @@ from mcp.client.stdio import stdio_client
 import json
 import sys
 import mlflow
+from app.utility.base_world import BaseWorld
 
-lm = dspy.LM(model="gpt-4o", api_key="")
-dspy.configure(lm=lm)
 
-env = os.environ.copy()
-venv_site_packages = os.path.join(sys.prefix, "Lib", "site-packages")
-if 'PYTHONPATH' in env:
-    env['PYTHONPATH'] = f"{venv_site_packages}:{env['PYTHONPATH']}"
-else:
-    env['PYTHONPATH'] = venv_site_packages
+def get_llm_config():
+    try:
+        config = BaseWorld.strip_yml('plugins/mcp/conf/default.yml')[0]
+        return config.get('llm', {})
+    except Exception as e:
+        print(f"[MCP] Failed to load LLM config: {e}")
+        return {}
+
+def configure_llm(llm_config, use_mock=False):
+    if use_mock:
+        class MockLM:
+            def __call__(self, prompt):
+                return "Mocked response"
+        dspy.configure(lm=MockLM())
+        return
+
+    if llm_config.get("offline", False):
+        os.environ["LITELLM_MODEL_METADATA_LOCAL_PATH"] = "/path/to/local.json"
+
+    lm = dspy.LM(
+        model=llm_config.get("model", "gpt-4o"),
+        api_key=llm_config.get("api_key", ""),
+        api_base=llm_config.get("api_base")
+    )
+    dspy.configure(lm=lm)
+
+
+def get_env():
+    env = os.environ.copy()
+    venv_site_packages = os.path.join(sys.prefix, "Lib", "site-packages")
+    if 'PYTHONPATH' in env:
+        env['PYTHONPATH'] = f"{venv_site_packages}:{env['PYTHONPATH']}"
+    else:
+        env['PYTHONPATH'] = venv_site_packages
+    return env
 
 
 mlflow.set_tracking_uri("http://localhost:5000")
@@ -23,8 +51,9 @@ mlflow.set_experiment("caldera-mcp-client-1")
 server_params = StdioServerParameters(
     command="python",
     args=["mcp_server.py"],
-    env=env,
+    env=get_env(),
 )
+
 
 
 class DSPyCalderaPlannerClient(dspy.Signature):
@@ -72,11 +101,11 @@ async def run(adversary_emulation_task: str):
             print(json.dumps(result.toDict(), indent=4))
 
 
-if __name__ == "__main__":
-    import asyncio
+# if __name__ == "__main__":
+#     import asyncio
 
-    asyncio.run(
-        run(
-            "I want to create a few abilities related to persistence with WMI for windows, then create an adversary with those abilities.  Please create more than one ability."
-        )
-    )
+#     asyncio.run(
+#         run(
+#             "I want to create a few abilities related to persistence with WMI for windows, then create an adversary with those abilities.  Please create more than one ability."
+#         )
+#     )
