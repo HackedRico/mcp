@@ -5,6 +5,13 @@
 mcp_server.py contains code that wraps the current caldera API into an accessible 
 format for LLMs.
 
+## Install
+
+In python virtualenv | requires specific version of dspy
+```
+pip install dspy[mcp] 
+```
+
 ## DEMOS
 
 ### Caldera Director | screen-capture(1).webm

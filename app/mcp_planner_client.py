@@ -17,8 +17,8 @@ else:
     env['PYTHONPATH'] = venv_site_packages
 
 
-mlflow.set_tracking_uri("http://localhost:5000")
-mlflow.set_experiment("caldera-mcp-client-1")
+#mlflow.set_tracking_uri("http://localhost:5000")
+#mlflow.set_experiment("caldera-mcp-client-1")
 
 server_params = StdioServerParameters(
     command="python",
