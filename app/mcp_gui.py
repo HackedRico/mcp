@@ -1,4 +1,3 @@
-import logging
 from aiohttp_jinja2 import template
 
 from app.service.auth_svc import for_all_public_methods, check_authorization
@@ -15,10 +14,9 @@ class McpGUI(BaseWorld):
         self.services = services
         # self.mcp_svc = McpService(services)
 
-        self.auth_svc = services.get('auth_svc')
-        self.log = logging.getLogger('mcp_gui')
+        self.auth_svc = services.get("auth_svc")
 
-    @template('mcp.html')
+    @template("mcp.html")
     async def splash(self, request):
         return dict(name=self.name, description=self.description)
 

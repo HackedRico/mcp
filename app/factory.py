@@ -32,6 +32,8 @@ class CreateCommand(dspy.Module):
         self.identify_technologies = dspy.ChainOfThought(IdentifyTechnologies)
         self.rank_approaches = dspy.ChainOfThought(RankApproaches)
         self.create_full_command = dspy.ChainOfThought(CreateFullCommand)
+        self.log = logging.getLogger("plugins.mcp")
+        self.log.info("[MCP] Initialized CreateCommand Module")
 
     def forward(self, description: str, platform: str):
         identified_technologies = self.identify_technologies(description=description, platform=platform)
