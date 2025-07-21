@@ -26,3 +26,4 @@ class MCPService(BaseService):
 
         result = MockResult(f"[MOCKED] Pretend we created an adversary for task: '{prompt}'")
         return result.process_result  # or return full result.toDict() if needed
+
