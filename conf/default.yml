@@ -1,7 +1,6 @@
 ---
 llm:
   model: gpt-4o
-  api_base: http://localhost:11434
-  api_key: not-needed
+  api_key: ***REDACTED-OPENAI-KEY***
   offline: true
   use_mock: false

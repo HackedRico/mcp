@@ -1,4 +1,4 @@
-from mcp import ClientSession, StdioServerParameters
+from mcp.server.fastmcp import FastMCP
 from pydantic import BaseModel
 import requests
 from datetime import datetime
@@ -11,40 +11,68 @@ from factory import CreateCommand
 
 mcp = FastMCP("Caldera API MCP Server", version="1.0.0")
 
-
-class CalderaService(services):
-    def __init__(self):
-        self.data_svc = services.get("data_svc")
-        self.log = logging.getLogger("plugins.mcp")
-        self.log.info("[MCP] Initialized CalderaService")
+"""
+total_requests data structure:
+{
+    "endpoint": {
         
+        [
+            "time_date": "response_code", 
+        ]
+    }
+}
+dict[key] = list[dict[str, str]]
+"""
 
 
-cal_serv = CalderaService(services)
+class CalderaRequest:
+    def __init__(self, url, api_key):
+        self.caldera_url = url
+        self.api_key = api_key
+        self.headers = {"KEY": f"{self.api_key}", "Content-Type": "application/json"}
+        self.total_get_requests = collections.defaultdict(list)
+        self.total_post_requests = collections.defaultdict(list)
 
-
-@mcp.tool()
-async def get_service_summary(services):
-    """
-    Return a summary of available core services.
-    """
-    return {k: str(v.__class__.__name__) for k, v in services.items() if v is not None}
-
-
-# Basic health might need some rework, not sure its providing the right info to the LLM
-@mcp.tool()
-async def health_check(services):
-    """
-    Perform a basic health check by pinging core services.
-    """
-    try:
-        data_svc = services.get("data_svc")
-        agents = await data_svc.locate("agents")
-        return (
-            "Caldera API is UP!" if agents is not None else "Caldera API check failed."
+    def make_get_request(self, endpoint):
+        response = requests.get(f"{self.caldera_url}{endpoint}", headers=self.headers)
+        self.total_get_requests[endpoint].append(
+            {
+                "time_date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "response_code": response.status_code,
+            }
         )
-    except Exception as e:
-        return f"Caldera API is DOWN: {str(e)}"
+        if response.status_code != 200:
+            return {"error": f"Request did not return 200. Error: {response.text}"}
+        return response.json()
+
+    def make_post_request(self, endpoint, body):
+        response = requests.post(
+            f"{self.caldera_url}{endpoint}", headers=self.headers, json=body
+        )
+        self.total_post_requests[endpoint].append(
+            {
+                "time_date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "response_code": response.status_code,
+            }
+        )
+        if response.status_code != 200:
+            return {"error": f"Request did not return 200. Error: {response.text}"}
+        return response.json()
+
+
+caldera_request = CalderaRequest(
+    url="http://localhost:8888/api/v2/",
+    api_key="ADMIN123",
+)
+
+
+@mcp.tool()
+def health_check():
+    """
+    Returns the health of the Caldera API.
+    """
+    if isinstance(caldera_request.make_get_request("health"), dict):
+        return "Caldera API is UP!"
 
 
 def filter_abilities(req, tactic: str, atomic: bool):
@@ -77,7 +105,7 @@ def filter_abilities(req, tactic: str, atomic: bool):
 
 
 @mcp.tool()
-async def get_abilities_by_tactic(services: dict, tactic: str):
+def get_abilities_by_tactic(tactic: str):
     """
     Returns the stockpile abilities of Caldera specified by the tactic.
     Possible Tactic Values:
@@ -91,244 +119,191 @@ async def get_abilities_by_tactic(services: dict, tactic: str):
     - discovery
     - defense-evasion
     """
-    data_svc = services.get("data_svc")
-    all_abilities = await data_svc.locate("abilities")
-
-    def filter_abilities(abilities, tactic, plugin_name):
-        return [
-            {
-                "ability_id": a.ability_id,
-                "name": a.name,
-                "tactic": a.tactic,
-                "technique": a.technique_name,
-            }
-            for a in abilities
-            if a.tactic == tactic and a.plugin == plugin_name
-        ]
-
-    stockpile_abilities = filter_abilities(all_abilities, tactic, "stockpile")
+    req = caldera_request.make_get_request("abilities")
+    stockpile_abilities = filter_abilities(req, tactic, atomic=False)
+    print(f"Stockpile Abilities: {stockpile_abilities}")
     if stockpile_abilities:
         return stockpile_abilities
-    atomic_abilities = filter_abilities(all_abilities, tactic, "atomic")
-    return atomic_abilities[:5] if len(atomic_abilities) > 5 else atomic_abilities
+    else:
+        stockpile_abilities = filter_abilities(req, tactic, atomic=True)
+        print(f"Stockpile Abilities: {stockpile_abilities}")
+        if len(stockpile_abilities) > 5:
+            return stockpile_abilities[:5]
 
 
 @mcp.tool()
-async def get_ability_by_id(services, ability_id: str):
+def get_ability_by_id(id: str):
     """
-    Returns the full ability information for the specified ability ID.
+    Returns the ability of the Caldera API specified by the id.
     """
-    data_svc = services.get("data_svc")
-    results = await data_svc.locate("abilities", match=dict(ability_id=ability_id))
-    return results[0].display if results else {}
+    return caldera_request.make_get_request(f"abilities/{id}")
 
 
 @mcp.tool()
-async def get_adversaries(services):
+def get_adversaries():
     """
-    Returns the adversary_id, name, and description for all Caldera adversaries.
+    Returns all Caldera adversaries.
     """
-    data_svc = services.get("data_svc")
-    all_adversaries = await data_svc.locate("adversaries")
-
-    return [
-        {
-            "adversary_id": adv.adversary_id,
-            "name": adv.name,
-            "description": adv.description,
-        }
-        for adv in all_adversaries
-    ]
+    req = caldera_request.make_get_request("adversaries")
+    adversary_list = []
+    for adversary in req:
+        adversary_stripped = {}
+        adversary_stripped["adversary_id"] = adversary["adversary_id"]
+        adversary_stripped["name"] = adversary["name"]
+        adversary_stripped["description"] = adversary["description"]
+        adversary_list.append(adversary_stripped)
+    return adversary_list
 
 
 @mcp.tool()
-# def get_adversary_by_ability_id(ability_id: str, ability_name: str = None):
-#     """
-#     Filters all Caldera adversaries by the specifies ability id or ability name.
-#     """
-#     req = caldera_request.make_get_request("adversaries")
-#     adversary_list = []
+def get_adversary_by_ability_id(ability_id: str, ability_name: str = None):
+    """
+    Filters all Caldera adversaries by the specifies ability id or ability name.
+    """
+    req = caldera_request.make_get_request("adversaries")
+    adversary_list = []
 
-#     abilities = caldera_request.make_get_request("abilities")
-#     if ability_name:
-#         named_abilities = [
-#             item for item in abilities
-#             if item.get("name") == ability_name
-#         ]
-#         ability_id = None
-#         if named_abilities:
-#             ability_id = named_abilities[0]["ability_id"]
-#             for adversary in req:
-#                 for key, value in adversary.items():
-#                     if key == "atomic_ordering":
-#                         for atomic_ordering in value:
-#                             if atomic_ordering == id:
-#                                 adversary_stripped = {}
-#                                 adversary_stripped["adversary_id"] = adversary["adversary_id"]
-#                                 adversary_stripped["name"] = adversary["name"]
-#                                 adversary_stripped["description"] = adversary["description"]
-#                                 adversary_list.append(adversary_stripped)
-#     elif ability_id:
-#         for adversary in req:
-#             for key, value in adversary.items():
-#                 if key == "atomic_ordering":
-#                     for atomic_ordering in value:
-#                         if atomic_ordering == ability_id:
-#                             adversary_stripped = {}
-#                             adversary_stripped["adversary_id"] = adversary["adversary_id"]
-#                             adversary_stripped["name"] = adversary["name"]
-#                             adversary_stripped["description"] = adversary["description"]
-#                             adversary_list.append(adversary_stripped)
-#     return adversary_list
-
-
-# async def get_adversary_by_id(services, adversary_id: str):
-#     data_svc = services.get('data_svc')
-#     matches = await data_svc.locate('adversaries', match=dict(adversary_id=adversary_id))
-#     return matches[0].display if matches else {}
-async def get_adversary_by_id(services, adversary_id: str):
-    data_svc = services.get("data_svc")
-    matches = await data_svc.locate(
-        "adversaries", match=dict(adversary_id=adversary_id)
-    )
-    return matches[0].display if matches else {}
+    abilities = caldera_request.make_get_request("abilities")
+    if ability_name:
+        named_abilities = [
+            item for item in abilities
+            if item.get("name") == ability_name
+        ]
+        ability_id = None
+        if named_abilities:
+            ability_id = named_abilities[0]["ability_id"]
+            for adversary in req:
+                for key, value in adversary.items():
+                    if key == "atomic_ordering":
+                        for atomic_ordering in value:
+                            if atomic_ordering == id:
+                                adversary_stripped = {}
+                                adversary_stripped["adversary_id"] = adversary["adversary_id"]
+                                adversary_stripped["name"] = adversary["name"]
+                                adversary_stripped["description"] = adversary["description"]
+                                adversary_list.append(adversary_stripped)
+    elif ability_id:
+        for adversary in req:
+            for key, value in adversary.items():
+                if key == "atomic_ordering":
+                    for atomic_ordering in value:
+                        if atomic_ordering == ability_id:
+                            adversary_stripped = {}
+                            adversary_stripped["adversary_id"] = adversary["adversary_id"]
+                            adversary_stripped["name"] = adversary["name"]
+                            adversary_stripped["description"] = adversary["description"]
+                            adversary_list.append(adversary_stripped)
+    return adversary_list
 
 
 @mcp.tool()
-async def get_adversary_by_name(services, name: str):
+def get_adversary_by_name(name: str):
     """
-    Returns the Caldera adversary information of the adversary specified by
-    name.
+    Returns the Caldera adversary specified by the name.
     """
-    data_svc = services.get("data_svc")
-    matches = await data_svc.locate("adversaries", match=dict(name=name))
-    return [m.display for m in matches]
+    req = caldera_request.make_get_request("adversaries")
+    found_adversaries = []
+    for adversary in req:
+        if adversary["name"] == name:
+            found_adversaries.append(adversary)
+    return found_adversaries
 
 
 @mcp.tool()
-async def get_adversary_id(services, id: str):
+def get_adversary_by_id(id: str):
     """
-    Returns the Caldera adversary specified by the ID,
-    including adversary_id, name, and description.
+    Returns the Caldera adversary specified by the id.
     """
-    data_svc = services.get("data_svc")
-    adversary = await data_svc.get("adversary", id)
-    if not adversary:
-        return {"error": f"Adversary with ID {id} not found"}
-
-    return {
-        "adversary_id": adversary.adversary_id,
-        "name": adversary.name,
-        "description": adversary.description,
-    }
+    req = caldera_request.make_get_request(f"adversaries/{id}")
+    adversary_stripped = {}
+    adversary_stripped["adversary_id"] = req["adversary_id"]
+    adversary_stripped["name"] = req["name"]
+    adversary_stripped["description"] = req["description"]
+    return adversary_stripped
 
 
 @mcp.tool()
-async def get_all_agents(services):
+def get_all_agents():
     """
     Returns all active and dead agents.
     """
-    data_svc = services.get("data_svc")
-    agents = await data_svc.locate("agents")
-    return [a.display for a in agents]
+
+    return caldera_request.make_get_request("agents")
 
 
 @mcp.tool()
-async def get_agent_by_paw(services, paw: str):
+def get_agent_by_paw(paw: str):
     """
-    Returns the agent information for the agent matching the provided paw id.
+    Returns the agent of the Caldera API specified by the paw.
     """
-    data_svc = services.get("data_svc")
-    matches = await data_svc.locate("agents", match=dict(paw=paw))
-    return matches[0].display if matches else {}
+
+    return caldera_request.make_get_request(f"agents/{paw}")
 
 
 @mcp.tool()
-async def get_all_operations(services):
+def get_all_operations():
     """
-    Returns all Caldera operations.
+    Returns all active and dead operations.
     """
-    data_svc = services.get("data_svc")
-    operations = await data_svc.locate("operations")
-    return [op.display for op in operations]
+
+    return caldera_request.make_get_request("operations")
 
 
 @mcp.tool()
-async def get_operation_by_id(services, operation_id: str):
+def get_operation_by_id(id: str):
     """
-    Returns Caldera operations specified by ID.
+    Return operation by specified id.
     """
-    data_svc = services.get("data_svc")
-    matches = await data_svc.locate("operations", match=dict(id=operation_id))
-    return matches[0].display if matches else {}
+
+    return caldera_request.make_get_request(f"operations/{id}")
 
 
 @mcp.tool()
-async def get_operation_links(services, operation_id: str):
+def get_operation_links(operation_id: str):
     """
     Specify an operation id to get the links of the operation.
     """
-    data_svc = services.get("data_svc")
-    matches = await data_svc.locate("operations", match=dict(id=operation_id))
-    if not matches:
-        return []
-    op = matches[0]
-    return [link.display for link in op.chain]
+
+    return caldera_request.make_get_request(f"operations/{operation_id}/links")
 
 
 @mcp.tool()
-async def get_operation_link(services, operation_id: str, link_id: str):
+def get_operation_link(operation_id: str, link_id: str):
     """
-    Specify the operation id and link id to get the specifics of the link for the operation.
+    Specify an operation id and link id to get the specific link of the specific operation.
     """
-    data_svc = services.get("data_svc")
-    matches = await data_svc.locate("operations", match=dict(id=operation_id))
-    if not matches:
-        return {}
-    op = matches[0]
-    for link in op.chain:
-        if str(link.id) == link_id:
-            return link.display
-    return {}
 
-
-@mcp.tool()
-async def get_operation_link_result(services, operation_id: str, link_id: str):
-    """
-    Specify an operation id and link id to get the results of a links performance on an operation.
-    """
-    data_svc = services.get("data_svc")
-    matches = await data_svc.locate("operations", match=dict(id=operation_id))
-    if not matches:
-        return {}
-    op = matches[0]
-    for link in op.chain:
-        if str(link.id) == link_id:
-            return {"output": link.output or ""}
-    return {}
-
-
-@mcp.tool()
-async def add_link_to_operation(
-    services, operation_id: str, ability_id: str, ability_executor: str, paw: str
-):
-    """
-    Manually add a link(new ability) to an ongoing operation by specifying:
-    operation id, ability_id, ability_executor, and paw id of the agent.
-    """
-    rest_svc = services.get("rest_svc")
-    return await rest_svc.add_link_to_operation(
-        operation_id=operation_id,
-        ability_id=ability_id,
-        paw=paw,
-        executor=ability_executor,
+    return caldera_request.make_get_request(
+        f"operations/{operation_id}/links/{link_id}"
     )
 
 
 @mcp.tool()
-async def create_adversary(
-    services, name: str, description: str, atomic_ordering: list
+def get_operation_link_result(operation_id: str, link_id: str):
+    """
+    Specify an operation id and link id to get the result of the specific link of the specific operation.
+    """
+
+    return caldera_request.make_get_request(
+        f"operations/{operation_id}/links/{link_id}/result"
+    )
+
+
+@mcp.tool()
+def add_link_to_operation(
+    operation_id: str, ability_id: str, ability_executor: str, paw: str
 ):
+    """
+    Add an ability to an existing operation by specifying the operation id, ability id, ability executor, and paw.
+    """
+    return caldera_request.make_post_request(
+        f"operations/{operation_id}/links",
+        {"ability_id": ability_id, "ability_executor": ability_executor, "paw": paw},
+    )
+
+
+@mcp.tool()
+def create_adversary(name: str, description: str, atomic_ordering: list):
     """
     Create a new adversary, specify a name, description, and atomic ordering.
     Atomic ordering is a list of ability ids that are used to order the abilities of the adversary.
@@ -338,36 +313,58 @@ async def create_adversary(
     "e99cce5c-cb7e-4a6e-8a09-1609a221b90a",
     "e3db134c-4aed-4c5a-9607-c50183c9ef9e"
     """
-    data_svc = services.get("data_svc")
     adversary_id = str(uuid.uuid4())
-    new_adv = await data_svc.create_adversary(
-        adversary_id=adversary_id,
-        name=name,
-        description=description,
-        atomic_ordering=atomic_ordering,
+
+    return caldera_request.make_post_request(
+        f"adversaries",
+        {
+            "adversary_id": adversary_id,
+            "name": name,
+            "description": description,
+            "atomic_ordering": atomic_ordering,
+        },
     )
-    return new_adv.display
 
 
 @mcp.tool()
-async def create_operation(services, operation_name: str, adversary_name: str):
+def create_operation(operation_name: str, adversary_name: str):
     """
-    Create an instance of a adversary profile by starting an operation with the operation name and the name
-    of the adversary.
-    """
-    data_svc = services.get("data_svc")
-    adversaries = await data_svc.locate("adversaries", match=dict(name=adversary_name))
-    if not adversaries:
-        return {"error": "Adversary not found"}
+    Create a new operation with the specified name and adversary.
 
-    adversary = adversaries[0]
-    op_data = {
+    Args:
+        operation_name: Name for the operation
+        adversary_id: ID of the adversary to use for this operation
+
+    Returns:
+        The response from the Caldera API or None if adversary details cannot be fetched
+    """
+    req = caldera_request.make_get_request("adversaries")
+    found_adversaries = []
+    for adversary in req:
+        if adversary["name"] == adversary_name:
+            found_adversaries.append(adversary)
+
+    adversary_details = found_adversaries[0]
+
+    operation_body = {
         "name": operation_name,
-        "adversary_id": adversary.adversary_id,
-        "group": "",
-        "objective_id": "495a9828-cab1-44dd-a0ca-66e58177d8cc",
+        "adversary": {
+            **{
+                k: adversary_details.get(k, "")
+                for k in [
+                    "adversary_id",
+                    "name",
+                    "description",
+                    "atomic_ordering",
+                    "tags",
+                    "plugin",
+                ]
+            },
+            "objective": "495a9828-cab1-44dd-a0ca-66e58177d8cc",
+        },
         "planner_id": "aaa7c857-37a0-4c4a-85f7-4e9f7f30e31a",
         "source_id": "ed32b9c3-9593-4c33-b0db-e2007315096b",
+        "objective_id": "495a9828-cab1-44dd-a0ca-66e58177d8cc",
         "state": "paused",
         "autonomous": 1,
         "auto_close": False,
@@ -375,24 +372,24 @@ async def create_operation(services, operation_name: str, adversary_name: str):
         "jitter": "2/4",
         "visibility": 51,
         "use_learning_parsers": True,
+        "group": "",
     }
-    new_op = await data_svc.create_operation(**op_data)
-    return new_op.display
+
+    return caldera_request.make_post_request("operations", operation_body)
 
 
 @mcp.tool()
-async def create_command(description: str, platform: str):
+def create_command(description: str, platform: str):
     """
-    Specify a high level command description(its intended goal and operation), and the platform(windows or linux) to receive
-    a fully completed command.
+    create a command by specifying a description of the command(what it does and how it works) and the platform it is for (windows or linux).
     """
-    create_command_factory = CreateCommand()
-    return await create_command_factory(description=description, platform=platform)
+
+    create_command = CreateCommand()
+    return create_command(description=description, platform=platform)
 
 
 @mcp.tool()
-async def create_windows_ability(
-    services,
+def create_windows_ability(
     name: str,
     description: str,
     command: str,
@@ -402,42 +399,63 @@ async def create_windows_ability(
     payloads: list = None,
 ):
     """
-    Create a windows ability
+    Create a new windows ability with the specified parameters.
+
+    Args:
+        name: Name of the ability
+        description: Description of what the ability does
+        command: The command to execute
+        tactic: MITRE ATT&CK tactic (e.g., 'privilege-escalation', 'discovery')
+        technique_name: Name of the MITRE ATT&CK technique
+        technique_id: Optional MITRE ATT&CK technique ID (e.g., 'T1548.002')
+        payloads: Optional list of payload files needed
+
+    Returns:
+        The response from the Caldera API
     """
-    data_svc = services.get("data_svc")
     ability_id = str(uuid.uuid4())
 
+    # Create the executor object with default values for optional fields
     executor = {
-        "name": "psh",
-        "platform": "windows",
+        "name": "windows",
+        "platform": "psh",
         "command": command,
-        "timeout": 60,
+        "code": None,
+        "language": None,
+        "build_target": None,
         "payloads": payloads or [],
         "uploads": [],
+        "timeout": 60,
         "parsers": [],
         "cleanup": [],
         "variations": [],
         "additional_info": {},
     }
 
-    new_ability = await data_svc.create_ability(
-        ability_id=ability_id,
-        tactic=tactic,
-        technique_name=technique_name,
-        technique_id=technique_id,
-        name=name,
-        description=description,
-        executors=[executor],
-        plugin="stockpile",
-        buckets=[tactic],
-        delete_payload=True,
-    )
-    return new_ability.display
+    ability_body = {
+        "ability_id": ability_id,
+        "tactic": tactic,
+        "technique_name": technique_name,
+        "technique_id": technique_id,
+        "name": name,
+        "description": description,
+        "executors": [executor],
+        "requirements": [],
+        "privilege": "",
+        "repeatable": False,
+        "buckets": [tactic],
+        "additional_info": {},
+        "access": {},
+        "singleton": False,
+        "plugin": "stockpile",
+        "delete_payload": True,
+    }
+
+    return caldera_request.make_post_request("abilities", ability_body)
 
 
 @mcp.tool()
-async def create_linux_ability(
-    services,
+def create_linux_ability(
     name: str,
     description: str,
     command: str,
@@ -447,47 +465,67 @@ async def create_linux_ability(
     payloads: list = None,
 ):
     """
-    Create a linux ability
+    Create a new ability for linux with the specified parameters.
+
+    Args:
+        name: Name of the ability
+        description: Description of what the ability does
+        command: The command to execute
+        tactic: MITRE ATT&CK tactic (e.g., 'privilege-escalation', 'discovery')
+        technique_name: Name of the MITRE ATT&CK technique
+        technique_id: Optional MITRE ATT&CK technique ID (e.g., 'T1548.002')
+        payloads: Optional list of payload files needed
+
+    Returns:
+        The response from the Caldera API
     """
-    data_svc = services.get("data_svc")
     ability_id = str(uuid.uuid4())
 
+    # Create the executor object with default values for optional fields
     executor = {
-        "name": "sh",
-        "platform": "linux",
+        "name": "linux",
+        "platform": "sh",
         "command": command,
-        "timeout": 60,
+        "code": None,
+        "language": None,
+        "build_target": None,
         "payloads": payloads or [],
         "uploads": [],
+        "timeout": 60,
         "parsers": [],
         "cleanup": [],
         "variations": [],
         "additional_info": {},
     }
 
-    new_ability = await data_svc.create_ability(
-        ability_id=ability_id,
-        tactic=tactic,
-        technique_name=technique_name,
-        technique_id=technique_id,
-        name=name,
-        description=description,
-        executors=[executor],
-        plugin="stockpile",
-        buckets=[tactic],
-        delete_payload=True,
-    )
-    return new_ability.display
+    ability_body = {
+        "ability_id": ability_id,
+        "tactic": tactic,
+        "technique_name": technique_name,
+        "technique_id": technique_id,
+        "name": name,
+        "description": description,
+        "executors": [executor],
+        "requirements": [],
+        "privilege": "",
+        "repeatable": False,
+        "buckets": [tactic],
+        "additional_info": {},
+        "access": {},
+        "singleton": False,
+        "plugin": "stockpile",
+        "delete_payload": True,
+    }
+
+    return caldera_request.make_post_request("abilities", ability_body)
 
 
 @mcp.tool()
-async def get_payloads(services):
+def get_payloads():
     """
-    Returns all ability payloads.
+    Returns all payloads.
     """
-    data_svc = services.get("data_svc")
-    payloads = await data_svc.locate("payloads")
-    return [p.display for p in payloads]
+    return caldera_request.make_get_request("payloads")
 
 
 if __name__ == "__main__":

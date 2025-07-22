@@ -1,10 +1,10 @@
 <template>
   <div class="is-flex is-justify-content-center" style="width: 100%;">
     <div class="box" style="width: 75%;">
-      <h2 class="title is-4 has-text-primary mb-4">Caldera Ability Factory Prompt</h2>
+      <h2 class="title is-4 has-text-primary mb-4">CTI-Enhanced Ability Factory</h2>
       <strong>Example Starting Prompt:</strong>
       <blockquote class="example-prompt">
-        I want to create a few abilities related to persistence with WMI for Windows, then create an adversary with those abilities. Please create more than one ability.
+        Create abilities that mimic APT28's persistence techniques, focusing on WMI and registry modifications.
       </blockquote>
 
       <div class="field">
@@ -13,20 +13,18 @@
             v-model="inputText"
             class="textarea"
             rows="4"
-            placeholder="Describe the adversary or abilities you'd like to create..."
+            placeholder="Describe abilities based on real threat actors or techniques..."
           ></textarea>
         </div>
       </div>
 
-      <div class="control mt-2">
-        <button class="button is-primary" @click="handleSubmit" :disabled="!inputText">
-          Submit
-        </button>
-      </div>
-
-      <div class="mb-3">
+      <div class="is-flex is-justify-content-space-between is-align-items-center mt-4">
         <button class="button is-light is-small" @click="$emit('back')">
           ← Back
+        </button>
+        <button class="button is-primary" @click="handleSubmit" :disabled="!inputText || isLoading">
+          <span v-if="isLoading">Creating with CTI...</span>
+          <span v-else>Create with CTI</span>
         </button>
       </div>
 
@@ -47,25 +45,32 @@ const $api = inject("$api")
 const inputText = ref('')
 const responseMessage = ref('')
 const errorMessage = ref('')
+const isLoading = ref(false)
 
 async function handleSubmit() {
   responseMessage.value = ''
   errorMessage.value = ''
+  isLoading.value = true
+  
   try {
-    const response = await $api.post('/plugin/mcp/execute', { text: inputText.value })
-    responseMessage.value = response.data.message || 'Successfully submitted prompt.'
+    let payload = { text: inputText.value, type: 'rag_factory' }
+    console.log("Submitting RAG factory payload:", payload)
+    const response = await $api.post('/plugin/mcp/execute', payload)
+    responseMessage.value = response.data.message || 'Successfully created CTI-based abilities and adversary.'
     inputText.value = ''
   } catch (err) {
-    errorMessage.value = err?.response?.data?.error || 'Submission failed.'
+    errorMessage.value = err?.response?.data?.error || 'CTI-enhanced creation failed.'
+  } finally {
+    isLoading.value = false
   }
 }
 </script>
 <style scoped>
 .example-prompt {
-  border-left: 4px solid #7a00cc;
+  border-left: 4px solid #cc7a00;
   padding: 1rem;
   background-color: #f4f4f4;
-  color: #222; /* darker text for better contrast */
+  color: #222;
   font-style: italic;
 }
 </style>

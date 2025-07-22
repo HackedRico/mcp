@@ -1,6 +1,6 @@
 <template>
   <div class="content">
-    <h2 class="title is-3">Caldera MCP:Factory</h2>
+    <h2 class="title is-3">Caldera MCP: AI-Powered Operations</h2>
     <hr />
 
     <div
@@ -8,62 +8,80 @@
       class="is-flex m-4"
       style="gap: 1.5rem; justify-content: center; flex-wrap: wrap;"
     >
-      <!-- Local -->
+      <!-- LLM Factory -->
       <div class="box" style="flex: 1 1 300px; max-width: 320px; display: flex; flex-direction: column; justify-content: space-between;">
         <div style="flex-grow: 1;">
-          <h3 class="title is-5">Local Ability Factory</h3>
+          <h3 class="title is-5">LLM Ability Factory</h3>
           <p>
-            This MCP showcases an LLM acting as a Caldera ability developer, creating new abilities from those found locally.
+            AI creates new abilities and adversaries based on your descriptions. Best for creating specific capabilities.
           </p>
         </div>
         <div class="is-flex is-justify-content-center mt-5">
-          <button class="button is-primary is-large" @click="selectedPath = 'local'">
-            Start MCP Session
+          <button class="button is-primary is-large" @click="selectedPath = 'factory'">
+            Start Factory Session
           </button>
         </div>
       </div>
 
-      <!-- Public -->
+      <!-- LLM Planner -->
       <div class="box" style="flex: 1 1 300px; max-width: 320px; display: flex; flex-direction: column; justify-content: space-between;">
         <div style="flex-grow: 1;">
-          <h3 class="title is-5">Public Ability Factory</h3>
+          <h3 class="title is-5">LLM Operation Planner</h3>
           <p>
-            This MCP showcases an LLM acting as a Caldera ability developer, creating new abilities from those found publicly.
+            AI plans and executes complete adversary operations. Best for comprehensive attack scenarios.
           </p>
         </div>
         <div class="is-flex is-justify-content-center mt-5">
-          <button class="button is-primary is-large" @click="selectedPath = 'public'">
-            Start MCP Session
+          <button class="button is-primary is-large" @click="selectedPath = 'planner'">
+            Start Planner Session
           </button>
         </div>
       </div>
 
-      <!-- RAG -->
+      <!-- RAG Factory -->
       <div class="box" style="flex: 1 1 300px; max-width: 320px; display: flex; flex-direction: column; justify-content: space-between;">
         <div style="flex-grow: 1;">
-          <h3 class="title is-5">Ability Factory with RAG</h3>
+          <h3 class="title is-5">CTI-Enhanced Factory</h3>
           <p>
-            This MCP showcases an LLM acting as a Caldera ability developer, incorporating CTI and a RAG.
+            AI creates abilities using real-world threat intelligence data. Best for realistic threat emulation.
           </p>
         </div>
         <div class="is-flex is-justify-content-center mt-5">
-          <button class="button is-primary is-large" @click="selectedPath = 'rag'">
-            Start MCP Session
+          <button class="button is-primary is-large" @click="selectedPath = 'rag_factory'">
+            Start CTI Factory
+          </button>
+        </div>
+      </div>
+
+      <!-- RAG Planner -->
+      <div class="box" style="flex: 1 1 300px; max-width: 320px; display: flex; flex-direction: column; justify-content: space-between;">
+        <div style="flex-grow: 1;">
+          <h3 class="title is-5">CTI-Enhanced Planner</h3>
+          <p>
+            AI plans operations based on real threat actor behaviors. Best for authentic adversary simulations.
+          </p>
+        </div>
+        <div class="is-flex is-justify-content-center mt-5">
+          <button class="button is-primary is-large" @click="selectedPath = 'rag_planner'">
+            Start CTI Planner
           </button>
         </div>
       </div>
     </div>
 
-    <McpPromptlocal v-if="selectedPath === 'local'" />
-    <McpPromptpublic v-if="selectedPath === 'public'" />
-    <McpPromptrag v-if="selectedPath === 'rag'" />
+    <McpPromptFactory v-if="selectedPath === 'factory'" @back="selectedPath = null" />
+    <McpPromptPlanner v-if="selectedPath === 'planner'" @back="selectedPath = null" />
+    <McpPromptRAGFactory v-if="selectedPath === 'rag_factory'" @back="selectedPath = null" />
+    <McpPromptRAGPlanner v-if="selectedPath === 'rag_planner'" @back="selectedPath = null" />
   </div>
 </template>
 
 <script setup>
 import { ref } from 'vue'
-import McpPromptlocal from './local_mcp_ability_factory.vue'
-import McpPromptpublic from './public_mcp_ability_factory.vue'
-import McpPromptrag from './rag_mcp_ability_factory.vue'
+import McpPromptFactory from './local_mcp_ability_factory.vue'
+import McpPromptPlanner from './public_mcp_ability_factory.vue'
+import McpPromptRAGFactory from './rag_mcp_ability_factory.vue'
+import McpPromptRAGPlanner from './rag_mcp_planner.vue'
+
 const selectedPath = ref(null)
 </script>

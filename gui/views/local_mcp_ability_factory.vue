@@ -1,7 +1,7 @@
 <template>
   <div class="is-flex is-justify-content-center" style="width: 100%;">
     <div class="box" style="width: 75%;">
-      <h2 class="title is-4 has-text-primary mb-4">Caldera Ability Factory Prompt</h2>
+      <h2 class="title is-4 has-text-primary mb-4">LLM Ability Factory</h2>
       <strong>Example Starting Prompt:</strong>
       <blockquote class="example-prompt">
         I want to create a few abilities related to persistence with WMI for Windows, then create an adversary with those abilities. Please create more than one ability.
@@ -22,8 +22,9 @@
       <button class="button is-light is-small" @click="$emit('back')">
         ← Back
       </button>
-      <button class="button is-primary" @click="handleSubmit" :disabled="!inputText">
-        Submit
+      <button class="button is-primary" @click="handleSubmit" :disabled="!inputText || isLoading">
+        <span v-if="isLoading">Processing...</span>
+        <span v-else>Submit</span>
       </button>
     </div>
       <div v-if="responseMessage" class="notification is-success mt-3">
@@ -43,18 +44,23 @@ const $api = inject("$api")
 const inputText = ref('')
 const responseMessage = ref('')
 const errorMessage = ref('')
+const isLoading = ref(false)
 
 async function handleSubmit() {
   responseMessage.value = ''
   errorMessage.value = ''
+  isLoading.value = true
+  
   try {
-    let payload = { text: inputText.value, type: 'local' }
-    console.log("Submitting payload:", payload)
+    let payload = { text: inputText.value, type: 'factory' }
+    console.log("Submitting factory payload:", payload)
     const response = await $api.post('/plugin/mcp/execute', payload)
-    responseMessage.value = response.data.message || 'Successfully submitted prompt.'
+    responseMessage.value = response.data.message || 'Successfully created abilities and adversary.'
     inputText.value = ''
   } catch (err) {
     errorMessage.value = err?.response?.data?.error || 'Submission failed.'
+  } finally {
+    isLoading.value = false
   }
 }
 </script>
