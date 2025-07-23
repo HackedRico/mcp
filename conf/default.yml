@@ -1,0 +1,6 @@
+---
+llm:
+  model: gpt-4o
+  api_key: ***REDACTED-OPENAI-KEY***
+  offline: true
+  use_mock: false
