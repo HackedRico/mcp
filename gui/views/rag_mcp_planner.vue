@@ -1,0 +1,76 @@
+<template>
+  <div class="is-flex is-justify-content-center" style="width: 100%;">
+    <div class="box" style="width: 75%;">
+      <h2 class="title is-4 has-text-primary mb-4">CTI-Enhanced Operation Planner</h2>
+      <strong>Example Starting Prompt:</strong>
+      <blockquote class="example-prompt">
+        Plan an operation that simulates APT28's credential harvesting campaign, including initial access, credential dumping, and data exfiltration phases.
+      </blockquote>
+
+      <div class="field">
+        <div class="control">
+          <textarea
+            v-model="inputText"
+            class="textarea"
+            rows="4"
+            placeholder="Describe an operation based on real threat actor TTPs..."
+          ></textarea>
+        </div>
+      </div>
+
+      <div class="is-flex is-justify-content-space-between is-align-items-center mt-4">
+        <button class="button is-light is-small" @click="$emit('back')">
+          ← Back
+        </button>
+        <button class="button is-primary" @click="handleSubmit" :disabled="!inputText || isLoading">
+          <span v-if="isLoading">Planning with CTI...</span>
+          <span v-else>Plan with CTI</span>
+        </button>
+      </div>
+
+      <div v-if="responseMessage" class="notification is-success mt-3">
+        {{ responseMessage }}
+      </div>
+      <div v-if="errorMessage" class="notification is-danger mt-3">
+        {{ errorMessage }}
+      </div>
+    </div>
+  </div>
+</template>
+
+<script setup>
+import { inject, ref } from "vue"
+
+const $api = inject("$api")
+const inputText = ref('')
+const responseMessage = ref('')
+const errorMessage = ref('')
+const isLoading = ref(false)
+
+async function handleSubmit() {
+  responseMessage.value = ''
+  errorMessage.value = ''
+  isLoading.value = true
+  
+  try {
+    let payload = { text: inputText.value, type: 'rag_planner' }
+    console.log("Submitting RAG planner payload:", payload)
+    const response = await $api.post('/plugin/mcp/execute', payload)
+    responseMessage.value = response.data.message || 'Successfully planned CTI-based operation.'
+    inputText.value = ''
+  } catch (err) {
+    errorMessage.value = err?.response?.data?.error || 'CTI-enhanced planning failed.'
+  } finally {
+    isLoading.value = false
+  }
+}
+</script>
+<style scoped>
+.example-prompt {
+  border-left: 4px solid #cc00cc;
+  padding: 1rem;
+  background-color: #f4f4f4;
+  color: #222;
+  font-style: italic;
+}
+</style> 
