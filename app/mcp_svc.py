@@ -6,11 +6,10 @@ from plugins.mcp.app.mcp_planner_client import run as planner_run
 from plugins.mcp.app.rag import RAGService
 from enum import Enum
 import os
+import mlflow
+import asyncio
+import json
 
-# from plugins.mcp.app.mcp_factory_client import run  # async def run(user_input: str)
-
-
-# create dspy config like in alteration pipeline and in bloodhound from here
 
 class ExecuteStyle(Enum):
     LLMfactory = "factory"
@@ -56,54 +55,74 @@ class MCPService(BaseService):
         self.log.info("[MCP] Initialized MCPService")
 
     async def execute(self, focus: str, prompt: str, file: dict = None):
-        """Execute MCP operations with optional RAG context."""
+        """Start MLflow run and launch async execution."""
+        run = mlflow.start_run(run_name="MCP Execution")
+        run_id = run.info.run_id
+        mlflow.end_run()  # Immediately end run so polling can begin
 
-        # Get RAG context if using RAG-enhanced execution
-
+        # Optional: collect RAG context
         rag_context = None
-        if focus in [ExecuteStyle.RAGplanner.value, ExecuteStyle.RAGfactory.value]:
-            self.log.info(f"RAG? {focus}")
-            self.log.info(f"rag_service: {self.rag_service}")
-            if self.rag_service:
-                self.log.info(f"bruh")
+        if focus in [ExecuteStyle.RAGplanner.value, ExecuteStyle.RAGfactory.value] and self.rag_service:
+            try:
                 rag_context = self.rag_service.get_context_for_task(prompt)
-                self.log.info(f"bruh1")
-                self.log.info(f"[MCP] Retrieved RAG context for task: {prompt}")
-            else:
-                self.log.warning("[MCP] RAG requested but service not initialized")
+                self.log.info("[MCP] RAG context retrieved")
+            except Exception as e:
+                self.log.warning(f"[MCP] RAG context error: {e}")
 
-        async def execute_factory(prompt, rag_context=None):
-            """Factory function to create a tool function with closure."""
-            self.log.info(f"rag_context: {rag_context}")
-            return await factory_run(prompt, rag_context=rag_context)
+        # Run logic in background
+        asyncio.create_task(self._run_execution(focus, prompt, rag_context, run_id))
 
-        async def execute_planner(prompt: str, rag_context=None):
-            """Factory function to create a tool function with closure."""
-            return await planner_run(prompt, rag_context=rag_context)
+        return {"run_id": run_id}
 
-        self.log.info(f"[MCP] Execution style: {focus}")
-        self.log.info(f"[MCP] Prompt: {prompt}")
+    async def _run_execution(self, focus, prompt, rag_context, run_id):
+        """Executes the full DSPy logic in background and tracks via MLflow."""
+        try:
+            # Force clear any stale MLflow context from main thread
+            mlflow.end_run()
+            with mlflow.start_run(run_id=run_id):
+                mlflow.set_tag("stage", "initializing")
+                mlflow.log_param("prompt", prompt)
 
-        #switch from gui? focus need to be compiled at gui for this approach to work
-        match focus:
-            case ExecuteStyle.LLMfactory.value:
-                self.log.info(f"[MCP] Executing factory with prompt: {prompt}")
-                result = await execute_factory(prompt)
-            case ExecuteStyle.LLMplanner.value:
-                self.log.info(f"[MCP] Executing planner with prompt: {prompt}")
-                result = await execute_planner(prompt)
-            case ExecuteStyle.RAGplanner.value:
-                self.log.info(f"[MCP] Executing RAG-enhanced planner with prompt: {prompt}")
-                result = await execute_planner(prompt, rag_context=rag_context)
-            case ExecuteStyle.RAGfactory.value:
-                self.log.info(f"[MCP] Executing RAG-enhanced factory with prompt: {prompt}")
-                result = await execute_factory(prompt, rag_context=rag_context)
-            case _:
-                self.log.error(f"[MCP] Unsupported execution style: {focus}")
-                raise ValueError(f"Unsupported execution style: {focus}")
+                if focus == ExecuteStyle.LLMfactory.value:
+                    self.log.info(f"[MCP] Executing factory with prompt: {prompt}")
+                    result = await factory_run(prompt, run_id=run_id)
 
-        # Return the actual result instead of mock
-        if hasattr(result, 'process_result'):
-            return result.process_result
-        else:
-            return str(result)  # Fallback for different result types
+                elif focus == ExecuteStyle.LLMplanner.value:
+                    self.log.info(f"[MCP] Executing planner with prompt: {prompt}")
+                    result = await planner_run(prompt, run_id=run_id)
+
+                elif focus == ExecuteStyle.RAGplanner.value:
+                    self.log.info(f"[MCP] Executing RAG-enhanced planner with prompt: {prompt}")
+                    # Log RAG context into MLflow
+                    if rag_context:
+                        for i, thought in enumerate(rag_context.get("thoughts", [])):
+                            mlflow.set_tag(f"thought_{i}", thought)
+                        mlflow.set_tag("tool_name_0", "get_context_for_task")
+                        mlflow.set_tag("tool_args_0", json.dumps({"query": prompt}))
+                    result = await planner_run(prompt, rag_context=rag_context, run_id=run_id)
+
+                elif focus == ExecuteStyle.RAGfactory.value:
+                    self.log.info(f"[MCP] Executing RAG-enhanced factory with prompt: {prompt}")
+                    # Log RAG context into MLflow
+                    if rag_context:
+                        for i, thought in enumerate(rag_context.get("thoughts", [])):
+                            mlflow.set_tag(f"thought_{i}", thought)
+                        mlflow.set_tag("tool_name_0", "get_context_for_task")
+                        mlflow.set_tag("tool_args_0", json.dumps({"query": prompt}))
+                    result = await factory_run(prompt, rag_context=rag_context, run_id=run_id)
+
+                else:
+                    raise ValueError(f"Unsupported execution style: {focus}")
+
+                mlflow.set_tag("stage", "complete")
+                mlflow.set_tag("status", "success")
+                mlflow.log_param("result", json.dumps(result.get("process_result", {})))
+
+        except Exception as e:
+            self.log.error(f"[MCP] Execution failed: {e}")
+            mlflow.set_tag("stage", "error")
+            mlflow.set_tag("status", "error")
+            mlflow.log_param("error", str(e))
+
+        finally:
+            mlflow.end_run()

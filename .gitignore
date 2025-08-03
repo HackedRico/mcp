@@ -10,3 +10,5 @@
 .logs/*
 !.logs/.gitkeep
 data/uploads/*
+mlruns/
+mlruns.db

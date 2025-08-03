@@ -22,7 +22,7 @@ class RAGService:
             temperature=0.5,
         ))
         
-        self.log.info(f"[RAG] Loading STIX bundle from: {stix_bundle_path}")
+        self.log.info(f"Loading STIX bundle from: {stix_bundle_path}")
         
         # Initialize with STIX bundle if provided
         if stix_bundle_path:
@@ -43,11 +43,11 @@ class RAGService:
         """Initialize the RAG service with a STIX bundle."""
         self.corpus, self.adv_step = self.extract_text_chunks(stix_bundle)
         
-        self.log.info("[RAG] Initializing STIX bundle")
+        self.log.info("Initializing STIX bundle")
         self.log.debug("[RAG] " + "="*50)
         
         embedder = dspy.Embedder('openai/text-embedding-3-small', api_key=self.api_key)
-        self.log.info(f"[RAG] Created embedder: {embedder}")
+        self.log.info(f"Created embedder: {embedder}")
         self.search = dspy.retrievers.Embeddings(
             corpus=self.corpus,
             embedder=embedder, 
@@ -76,16 +76,16 @@ class RAGService:
     
     def search_cti_title(self, query: str) -> List[str]:
         """Returns top-5 results and then the names of the top-5 to top-30 results."""
-        self.log.info(f"[RAG] Searching CTI title with query: {query}")
+        self.log.info(f"Searching CTI title with query: {query}")
         
         if not self.search:
-            self.log.warning("[RAG] Search attempted but RAG service not initialized with STIX data")
+            self.log.warning("Search attempted but RAG service not initialized with STIX data")
             return ["RAG service not initialized with STIX data"]
             
-        self.log.debug(f"[RAG] Using search retriever: {self.search}")
+        self.log.debug(f"Using search retriever: {self.search}")
         
         topK = self.search(query)
-        self.log.debug(f"[RAG] Retrieved top {len(topK)} results")
+        self.log.debug(f" Retrieved top {len(topK)} results")
         self.log.info(f"topK: {topK}")
         names = []
         if len(topK) > 5:
@@ -100,34 +100,33 @@ class RAGService:
     
     def search_cti_data_by_title(self, name: str) -> str:
         """Returns the full CTI data for a given name."""
-        self.log.info(f"[RAG] Searching CTI data for title: {name}")
+        self.log.info(f"Searching CTI data for title: {name}")
         
         if name in self.adv_step:
-            self.log.debug("[RAG] Found title in adv_step cache")
+            self.log.debug("Found title in adv_step cache")
             return self.adv_step[name]
         
         if not self.search:
-            self.log.warning("[RAG] Search attempted but RAG service not initialized with STIX data")
+            self.log.warning("Search attempted but RAG service not initialized with STIX data")
             return "RAG service not initialized with STIX data"
         
         results = [x for x in self.search(name, 10) if x.startswith(name + " | ")]
         if not results:
-            self.log.warning(f"[RAG] No CTI data found for name: {name}")
+            self.log.warning(f"No CTI data found for name: {name}")
             return f"No CTI data found for name: {name}"
             
-        self.log.debug(f"[RAG] Found {len(results)} matching results")
+        self.log.debug(f"Found {len(results)} matching results")
         return results[0]
     
     def get_context_for_task(self, task: str) -> Dict[str, any]:
-        """Get relevant CTI context for a given task."""
-        self.log.info(f"[RAG] Getting context for task: {task}")
-        
+        thoughts = []
+
+        thoughts.append(f"Getting context for task: {task}")
         cti_results = self.search_cti_title(task)
-        self.log.debug(f"[RAG] Retrieved {len(cti_results)} CTI results")
-        
-        # Extract detailed information for top results
+        thoughts.append(f"Retrieved {len(cti_results)} CTI results")
+
         detailed_context = []
-        for result in cti_results[:3]:  # Get details for top 3 results
+        for result in cti_results[:3]:
             if " | " in result:
                 name = result.split(" | ")[0]
                 detail = self.search_cti_data_by_title(name)
@@ -135,12 +134,13 @@ class RAGService:
                     "name": name,
                     "description": detail
                 })
-        
-        self.log.info(f"[RAG] Generated context with {len(detailed_context)} detailed entries")
+                thoughts.append(f"Retrieved detail for: {name}")
+
         return {
             "search_results": cti_results,
             "detailed_context": detailed_context,
-            "query": task
+            "query": task,
+            "thoughts": thoughts  # <-- this is what Stage should display
         }
 
 
