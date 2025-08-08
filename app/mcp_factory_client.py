@@ -6,6 +6,9 @@ import json
 import sys
 import mlflow
 from app.utility.base_world import BaseWorld
+import traceback
+from mlflow.tracking import MlflowClient
+import asyncio
 
 
 def get_llm_config():
@@ -27,13 +30,13 @@ def configure_llm(llm_config, use_mock=False):
     if llm_config.get("offline", False):
         os.environ["LITELLM_MODEL_METADATA_LOCAL_PATH"] = "/path/to/local.json"
 
-    lm = dspy.LM(
-        model=llm_config.get("model", "gpt-4o"),
-        api_key=llm_config.get("api_key", ""),
-        api_base=llm_config.get("api_base")
-    )
+    lm = {
+        "model": llm_config.get("model", "gpt-4o"),
+        "api_key": llm_config.get("api_key", ""),
+        "api_base": llm_config.get("api_base")
+    }
+    
     dspy.configure(lm=lm)
-
 
 def get_env():
     env = os.environ.copy()
@@ -44,10 +47,9 @@ def get_env():
         env['PYTHONPATH'] = venv_site_packages
     return env
 
-
 mlflow.set_tracking_uri("http://localhost:5000")
 mlflow.set_experiment("caldera-mcp-client-1")
-mlflow.dspy.autolog()
+# mlflow.dspy.autolog()
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 server_params = StdioServerParameters(
@@ -55,8 +57,6 @@ server_params = StdioServerParameters(
     args=[current_dir+"/mcp_server.py"],
     env=get_env(),
 )
-
-
 
 class DSPyCalderaFactoryClient(dspy.Signature):
     """You are an ability factory for the Caldera adversary emulation platform.  You are given a list of tools to handle user requests and control Caldera via the
@@ -70,7 +70,6 @@ class DSPyCalderaFactoryClient(dspy.Signature):
             "Message that summarizes the result of the newly created adversary."
         )
     )
-
 
 class DSPyCalderaFactoryClientWithRAG(dspy.Signature):
     """You are an ability factory for the Caldera adversary emulation platform enhanced with Cyber Threat Intelligence (CTI) data.
@@ -90,16 +89,14 @@ class DSPyCalderaFactoryClientWithRAG(dspy.Signature):
         )
     )
 
-
 # Factory function to create tool functions with proper closure
 def create_tool_function(session, tool_name, tool_description):
     async def tool_function(**kwargs):
+        mlflow.set_tag("stage", f"Tool.{tool_name}")
         result = await session.call_tool(tool_name, kwargs)
         return result
-    
     tool_function.__doc__ = tool_description
     return tool_function
-
 
 def format_rag_context(rag_context):
     """Format RAG context into a string for the DSPy signature."""
@@ -123,51 +120,93 @@ def format_rag_context(rag_context):
     
     return "\n".join(formatted_parts)
 
-
-async def run(adversary_emulation_task: str, rag_context=None):
+async def run(adversary_emulation_task: str, rag_context=None, run_id=None):
     # Configure LLM if not already configured
     if not dspy.settings.lm:
+        print('[MCP] Configuring LLM...')
         llm_config = get_llm_config()
         configure_llm(llm_config)
+
+    # Use the passed-in run_id to continue the MLflow run if provided
+    if run_id:
+        pass
+    else:
+        run = mlflow.start_run(run_name="MCP Ability Factory")
+        run_id = run.info.run_id
+
+    mlflow.set_tag("status", "running")
+    mlflow.set_tag("stage", "initializing")
+    mlflow.log_param("prompt", adversary_emulation_task)
+    tag_stream_task = None
+
+    try:
+        async with stdio_client(server_params) as (read, write):
+            async with ClientSession(read, write) as session:
+                print("[MCP] Initializing MCP session...")
+                mlflow.set_tag("stage", "initializing MCP session")
+                await session.initialize()
+
+                mlflow.set_tag("stage", "listing tools")
+                tools = await session.list_tools()
+               
+                mlflow.set_tag("stage", "creating DSPy ReAct instance")
+                dspy_tools = [dspy.Tool.from_mcp_tool(session, tool) for tool in tools.tools]
+               
+                if rag_context:
+                    signature = DSPyCalderaFactoryClientWithRAG
+                    formatted_context = format_rag_context(rag_context)
+                    react = dspy.ReAct(signature, tools=dspy_tools)
+                    mlflow.set_tag("stage", "executing DSPy ReAct with RAG")
+                    result = await react.acall(adversary_emulation_task=adversary_emulation_task, cti_context=formatted_context)
+                else:
+                    signature = DSPyCalderaFactoryClient
+                    react = dspy.ReAct(signature, tools=dspy_tools)
+                    mlflow.set_tag("stage", "executing DSPy ReAct")
+                    result = await react.acall(adversary_emulation_task=adversary_emulation_task)
+
+                mlflow.set_tag("stage", "completed")
+                mlflow.set_tag("status", "complete")
+                mlflow.set_tag("reasoning", result.reasoning)
+                mlflow.set_tag("process_result", result.process_result)
+                for k, v in result.trajectory.items():
+                    mlflow.set_tag(k, json.dumps(v) if isinstance(v, (dict, list)) else str(v))
+
+
+
+                mlflow.log_param("result_summary", result.process_result)
+
+                mlflow.end_run()
+                print(json.dumps(result.toDict(), indent=4))
+                return {"process_result": result.process_result}
+
+    except Exception as e:
+        tb = traceback.format_exc()
+
+        # Print the traceback to stdout explicitly
+        print("[MCP] Exception occurred:")
+        print(tb)
+        mlflow.set_tag("status", "failed")
+        mlflow.set_tag("stage", "error")
+        mlflow.log_param("error", str(e))
+        mlflow.log_param("traceback", tb)
+        mlflow.end_run()
+        raise
     
-    async with stdio_client(server_params) as (read, write):
 
-        async with ClientSession(read, write) as session:
-            # Initialize the connection
-            await session.initialize()
-            # List available tools
-            tools = await session.list_tools()
+    client = MlflowClient()
+    latest_thought = None
+    latest_observation = None
 
-            # Convert MCP tools to DSPy tools
-            dspy_tools = []
-            for tool in tools.tools:
-                dspy_tools.append(dspy.Tool.from_mcp_tool(session, tool))
+    while True:
+        run = client.get_run(run_id)
+        tags = run.data.tags
 
-            # Choose signature based on whether RAG context is available
-            if rag_context:
-                signature = DSPyCalderaFactoryClientWithRAG
-                formatted_context = format_rag_context(rag_context)
-                react = dspy.ReAct(signature, tools=dspy_tools)
-                result = await react.acall(
-                    adversary_emulation_task=adversary_emulation_task,
-                    cti_context=formatted_context
-                )
-            else:
-                signature = DSPyCalderaFactoryClient
-                react = dspy.ReAct(signature, tools=dspy_tools)
-                result = await react.acall(
-                    adversary_emulation_task=adversary_emulation_task
-                )
-            
-            print(json.dumps(result.toDict(), indent=4))
-            return result
+        if tags.get("latest_thought") != latest_thought:
+            latest_thought = tags["latest_thought"]
+            client.set_tag(run_id, "frontend_thought", latest_thought)
 
+        if tags.get("latest_observation") != latest_observation:
+            latest_observation = tags["latest_observation"]
+            client.set_tag(run_id, "frontend_observation", latest_observation)
 
-# if __name__ == "__main__":
-#     import asyncio
-
-#     asyncio.run(
-#         run(
-#             "I want to create a few abilities related to persistence with WMI for windows, then create an adversary with those abilities.  Please create more than one ability."
-#         )
-#     )
+        await asyncio.sleep(2)
