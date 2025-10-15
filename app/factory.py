@@ -1,7 +1,13 @@
 import dspy
+import yaml
 
-lm = dspy.LM(model="gpt-4o", api_key="***REDACTED-OPENAI-KEY***")
-dspy.configure(lm=lm)
+with open("/home/kali/coding/caldera/plugins/mcp/conf/default.yml", 'r') as file:
+    config = yaml.safe_load(file)
+    lm = dspy.LM(config['factory']['model'], api_key=config['factory']['api_key'], temperature=config['factory']['temperature'])
+    dspy.configure(lm=lm)
+
+#lm = dspy.LM(model="gpt-4o", api_key="***REDACTED-OPENAI-KEY***")
+#dspy.configure(lm=lm)
 
 class RankApproaches(dspy.Signature):
     """Rank the approaches to create the command."""
@@ -22,7 +28,7 @@ class IdentifyTechnologies(dspy.Signature):
     technologies: list[str] = dspy.OutputField()
 
 class CreateFullCommand(dspy.Signature):
-    """Create the full command."""
+    """Create the full command. Only produce the command, do not give reasoning or comments.  Do not wrap the response in any tags."""
     technologies: list[str] = dspy.InputField()
     approaches: list[str] = dspy.InputField()
     command: str = dspy.OutputField()

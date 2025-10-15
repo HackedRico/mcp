@@ -7,23 +7,7 @@ import collections
 import uuid
 
 from factory import CreateCommand
-
-
-mcp = FastMCP("Caldera API MCP Server", version="1.0.0")
-
-"""
-total_requests data structure:
-{
-    "endpoint": {
-        
-        [
-            "time_date": "response_code", 
-        ]
-    }
-}
-dict[key] = list[dict[str, str]]
-"""
-
+mcp = FastMCP("Caldera API MCP Server")
 
 class CalderaRequest:
     def __init__(self, url, api_key):
@@ -378,7 +362,6 @@ def create_operation(operation_name: str, adversary_name: str):
     return caldera_request.make_post_request("operations", operation_body)
 
 
-@mcp.tool()
 def create_command(description: str, platform: str):
     """
     create a command by specifying a description of the command(what it does and how it works) and the platform it is for (windows or linux).
@@ -392,7 +375,7 @@ def create_command(description: str, platform: str):
 def create_windows_ability(
     name: str,
     description: str,
-    command: str,
+    command_description: str,
     tactic: str,
     technique_name: str,
     technique_id: str = None,
@@ -404,7 +387,7 @@ def create_windows_ability(
     Args:
         name: Name of the ability
         description: Description of what the ability does
-        command: The command to execute
+        command_description: Detailed description of the command to use in the windows ability
         tactic: MITRE ATT&CK tactic (e.g., 'privilege-escalation', 'discovery')
         technique_name: Name of the MITRE ATT&CK technique
         technique_id: Optional MITRE ATT&CK technique ID (e.g., 'T1548.002')
@@ -414,12 +397,12 @@ def create_windows_ability(
         The response from the Caldera API
     """
     ability_id = str(uuid.uuid4())
-
+    created_command = create_command(command_description, "windows")
     # Create the executor object with default values for optional fields
     executor = {
         "name": "windows",
         "platform": "psh",
-        "command": command,
+        "command": created_command,
         "code": None,
         "language": None,
         "build_target": None,

@@ -2,65 +2,159 @@
   <div class="is-flex is-justify-content-center" style="width: 100%;">
     <div style="width: 75%;">
 
-      <!-- Header + Form -->
-      <div class="box">
-        <div class="is-flex is-align-items-center is-justify-content-space-between mb-3">
-          <h2 class="title is-4 has-text-primary mb-0">LLM Operation Planner</h2>
-          <span class="icon is-clickable" @click="collapsibleBoxOpen = !collapsibleBoxOpen">
-            <font-awesome-icon :icon="['fas', collapsibleBoxOpen ? 'minus' : 'plus']" />
-          </span>
-        </div>
-        <div v-show="collapsibleBoxOpen">
-          <!-- Form Inputs and Example Prompt -->
-          <div v-if="uiPhase === 'idle' || uiPhase === 'finished'">
-            <strong>Example Starting Prompt:</strong>
-      <blockquote class="example-prompt">
-        Find some abilities that constitute a stealer adversary for linux which includes credential-access and exfiltration, then create an adversary with those abilities, then create an operation with the adversary.
-      </blockquote>
+      <div class="columns is-variable is-4">
+        <!-- LEFT: Header + Form + Prompt/Reasoning notifications -->
+        <div class="column is-two-thirds">
+          <div class="box">
+            <div class="is-flex is-align-items-center is-justify-content-space-between mb-3">
+              <h2 class="title is-4 has-text-primary mb-0">LLM Operation Planner</h2>
+              <span class="icon is-clickable" @click="collapsibleBoxOpen = !collapsibleBoxOpen">
+                <font-awesome-icon :icon="['fas', collapsibleBoxOpen ? 'minus' : 'plus']" />
+              </span>
+            </div>
 
-      <div class="field">
-        <div class="control">
-          <textarea
-            v-model="inputText"
-            class="textarea"
-            rows="4"
-            placeholder="Describe the complete adversary operation you'd like to plan and execute..."
-          ></textarea>
-        </div>
-      </div>
+            <div v-show="collapsibleBoxOpen">
+              <!-- Form Inputs and Example Prompt -->
+              <div v-if="uiPhase === 'idle' || uiPhase === 'finished'">
+                <strong>Example Starting Prompt:</strong>
+                <blockquote class="example-prompt">
+                  Find some abilities that constitute a stealer adversary for linux which includes credential-access and exfiltration, then create an adversary with those abilities, then create an operation with the adversary.
+                </blockquote>
 
-            <div class="is-flex is-justify-content-space-between is-align-items-center mt-4">
+                <div class="field">
+                  <div class="control">
+                    <textarea
+                      v-model="inputText"
+                      class="textarea"
+                      rows="4"
+                      placeholder="Describe the complete adversary operation you'd like to plan and execute..."
+                    ></textarea>
+                  </div>
+                </div>
+
+                <div class="is-flex is-justify-content-space-between is-align-items-center mt-4">
+                  <button class="button is-light is-small" @click="$emit('back')">
+                    ← Back
+                  </button>
+                  
+                  <button class="button is-primary" @click="handleSubmit" :disabled="!inputText || isLoading">
+                    <span v-if="isLoading">Processing...</span>
+                    <span v-else>Submit</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <!-- Notifications + Prompt + Reasoning (outside collapsible) -->
+            <div class="mt-3" v-if="responseMessage || errorMessage || submittedPrompt || pollReasoning">
+              <div v-if="responseMessage" class="notification is-success">
+                {{ responseMessage }}
+              </div>
+              <div v-if="errorMessage" class="notification is-danger">
+                {{ errorMessage }}
+              </div>
+
+              <!-- Prompt moved here as its own notification -->
+              <div v-if="uiPhase !== 'idle' && (submittedPrompt || pollPrompt)" class="notification is-info is-light">
+                <strong>Prompt:</strong>
+                <p class="mt-1">{{ submittedPrompt || pollPrompt }}</p>
+              </div>
+
+              <!-- Styled Reasoning panel -->
+              <div v-if="uiPhase !== 'idle' && pollReasoning" class="reasoning-panel mt-2">
+                <strong class="reasoning-title">Reasoning</strong>
+                <pre class="reasoning-pre">{{ pollReasoning }}</pre>
+              </div>
+            </div>
+
+            <!-- Conditional Back Button when collapsed -->
+            <div v-if="!collapsibleBoxOpen" class="mb-4">
               <button class="button is-light is-small" @click="$emit('back')">
                 ← Back
               </button>
-              
-              <button class="button is-primary" @click="handleSubmit" :disabled="!inputText || isLoading">
-                <span v-if="isLoading">Processing...</span>
-                <span v-else>Submit</span>
-              </button>
             </div>
           </div>
-
-          <div v-if="responseMessage" class="notification is-success mt-3">
-            {{ responseMessage }}
-          </div>
-          
-          <div v-if="errorMessage" class="notification is-danger mt-3">
-            {{ errorMessage }}
-          </div>
         </div>
-        <!-- Conditional Back Button shown only when collapsibleBoxOpen is false -->
-        <div v-if="!collapsibleBoxOpen" class="mb-4">
-          <button class="button is-light is-small" @click="$emit('back')">
-            ← Back
-          </button>
+
+        <!-- RIGHT: Model Config box -->
+        <div class="column is-one-third">
+          <div class="box">
+            <h3 class="title is-5 has-text-primary">Model Config</h3>
+
+            <div class="field">
+              <label class="label">Model</label>
+              <div class="control">
+                <input
+                  class="input"
+                  type="text"
+                  v-model="modelName"
+                  placeholder="e.g., gpt-4o"
+                  :disabled="isLoading"
+                />
+              </div>
+            </div>
+
+            <div class="field">
+              <label class="label">Temperature</label>
+              <div class="control">
+                <input
+                  class="input"
+                  type="number"
+                  v-model.number="temperature"
+                  step="0.1"
+                  min="0.1"
+                  max="1"
+                  :disabled="isLoading"
+                />
+              </div>
+            </div>
+
+            <div class="field">
+              <label class="label">API Key</label>
+              <div class="control">
+                <input
+                  class="input"
+                  type="password"
+                  v-model="apiKey"
+                  placeholder="Enter API key"
+                  :disabled="isLoading"
+                />
+              </div>
+            </div>
+
+            <div class="field">
+              <label class="label">Max Tool Calls</label>
+              <div class="control">
+                <input
+                  class="input"
+                  type="number"
+                  v-model.number="maxToolCalls"
+                  min="1"
+                  step="1"
+                  :disabled="isLoading"
+                />
+              </div>
+            </div>
+
+            <div class="field">
+              <label class="label">Max Tokens</label>
+              <div class="control">
+                <input
+                  class="input"
+                  type="number"
+                  v-model.number="maxTokens"
+                  min="1000"
+                  step="1000"
+                  :disabled="isLoading"
+                />
+              </div>
+            </div>
+          </div>
         </div>
       </div>
-      
-      <!-- Polled Feedback from MLflow -->
+
+      <!-- Polled Feedback from MLflow (Prompt removed here) -->
       <div v-if="uiPhase === 'running' || uiPhase === 'finished'" class="mt-4">
-        <p v-if="pollPrompt" class="is-size-5 has-text-weight-medium"><strong>Prompt: </strong> {{ pollPrompt }}</p>
-        
         <p v-if="displayedStage && displayedStage.toLowerCase() !== 'completed'" class="is-size-5 has-text-weight-medium">
           <strong>Stage: </strong> {{ displayedStage }}
         </p>
@@ -129,17 +223,10 @@
         </div>
       </div>
 
-      <!-- Reasoning Section -->
-      <div v-if="uiPhase === 'running' || uiPhase === 'finished'" class="mt-5" v-show="pollReasoning">
-        <div class="box">
-          <h3 class="title is-5">Reasoning</h3>
-          <p>{{ pollReasoning }}</p>
-        </div>
-      </div>
+      <!-- Removed old Reasoning Section (now shown in main box) -->
 
     </div>
   </div>
-
 </template>
 
 
@@ -150,6 +237,7 @@ import { faPlus, faMinus } from '@fortawesome/free-solid-svg-icons'
 
 const $api = inject("$api")
 const inputText = ref('')
+const submittedPrompt = ref('')
 const responseMessage = ref('')
 const errorMessage = ref('')
 const isLoading = ref(false)
@@ -170,11 +258,14 @@ const stageQueue = ref([])
 let stageInterval = null
 const displayedStage = ref('')
 let hasShownInitialMessage = false
-const parsedOperationLine = ref('');
+const parsedOperationLine = ref('')
 
-
-
-
+// Model Config
+const modelName = ref('gpt-4o')
+const temperature = ref(0.5)
+const apiKey = ref('')
+const maxToolCalls = ref(5)
+const maxTokens = ref(10000)
 
 let dotCount = 0
 let dotInterval = null
@@ -208,12 +299,24 @@ async function handleSubmit() {
   hasShownInitialMessage = false
   stageQueue.value = []
   stageInterval = null
-  
+
+  submittedPrompt.value = inputText.value?.trim() || ''
+
   try {
     if (pollInterval) clearInterval(pollInterval)
     if (stageInterval) clearInterval(stageInterval)
 
-    let payload = { text: inputText.value, type: 'planner' }
+    let payload = { 
+      text: inputText.value, 
+      type: 'planner',
+      config: {
+        model: modelName.value,
+        temperature: temperature.value,
+        api_key: apiKey.value,
+        max_tool_calls: maxToolCalls.value,
+        max_tokens: maxTokens.value
+      }
+    }
 
     const response = await $api.post('/plugin/mcp/execute', payload)
 
@@ -256,7 +359,7 @@ function pollStatusUpdates(id) {
       const stage = res.data.stage;
       const stageLower = stage?.toLowerCase();
 
-      // ✅ Queue unseen, non-duplicate stages only
+      // Queue unseen, non-duplicate stages only
       if (
         stage &&
         !stageLower.includes('complete') &&
@@ -268,27 +371,23 @@ function pollStatusUpdates(id) {
         if (!displayedStage.value && stageQueue.value.length === 0 && shownStages.size === 0) {
           displayedStage.value = stage;
           shownStages.add(stage);
-          console.log('[DISPLAY] First stage shown immediately:', stage);
         } else {
           stageQueue.value.push(stage);
-          console.log('[QUEUE] New stage added:', stage);
         }
       }
 
-
-      // ✅ Stage displayer: every 8s, show one new stage
+      // Stage displayer: every 8s, show one new stage
       if (!stageInterval) {
         stageInterval = setInterval(() => {
           if (stageQueue.value.length > 0) {
             const next = stageQueue.value.shift();
             displayedStage.value = next;
             shownStages.add(next);
-            console.log('[DISPLAY] Stage now showing:', next);
           }
         }, 8000);
       }
 
-      // ✅ Exit condition
+      // Exit condition
       if (pollStatus.value === 'FINISHED' || pollStatus.value === 'FAILED') {
         clearInterval(pollInterval);
         clearInterval(stageInterval);
@@ -301,7 +400,7 @@ function pollStatusUpdates(id) {
         responseMessage.value = 'Execution complete.';
       }
 
-      // ✅ Post-processing logic (unchanged, keep this as-is)
+      // Post-processing logic
       const traj = res.data.trajectory;
       if (!traj) {
         console.warn('[WARN] No trajectory found in response.');
@@ -387,7 +486,7 @@ function pollStatusUpdates(id) {
         })
         .filter(Boolean);
 
-      // 🔍 Find operation creation entry
+      // Find operation creation entry
       const opToolEntry = Object.entries(traj).find(
         ([k, v]) => k.startsWith('tool_name_') && v === 'create_operation'
       );
@@ -411,7 +510,6 @@ function pollStatusUpdates(id) {
           console.debug('[DEBUG] Parsed operation args name:', opArgs.operation_name);
         }
       }
-
 
     } catch (e) {
       console.error('Polling error:', e);
@@ -482,6 +580,7 @@ const operationSentenceKeys = computed(() =>
     s.toLowerCase().includes('operation')
   )
 );
+
 function assignInjectLocations() {
   const used = new Set();
   const injects = {};
@@ -513,8 +612,6 @@ const resolvedInjects = computed(assignInjectLocations);
 const lastAbilitySentenceKeys = computed(() => (resolvedInjects.value?.ability ?? new Set()));
 const lastAdversarySentenceKeys = computed(() => (resolvedInjects.value?.adversary ?? new Set()));
 const lastOperationSentenceKeys = computed(() => (resolvedInjects.value?.operation ?? new Set()));
-
-
 
 watch(responseMessage, (newVal, oldVal) => {
   if (newVal && newVal !== oldVal) {
@@ -556,5 +653,29 @@ watch(responseMessage, (newVal, oldVal) => {
   margin-left: 1.5rem;  /* indent */
   margin-bottom: 0.5rem;  /* vertical spacing between bullets */
   line-height: 1.4;  /* slightly more legible */
+}
+
+/* Reasoning panel to match palette */
+.reasoning-panel {
+  border-left: 4px solid #7a00cc;
+  background-color: #f4f4f4;
+  color: #222;
+  padding: 1rem;
+  border-radius: 6px;
+}
+.reasoning-title {
+  color: #363636;
+}
+.reasoning-pre {
+  white-space: pre-wrap;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  background-color: #ffffff;
+  color: #222;
+  padding: 0.75rem;
+  border-radius: 4px;
+  margin-top: 0.5rem;
+  max-height: 260px;
+  overflow: auto;
+  border: 1px solid #e6e6e6;
 }
 </style>

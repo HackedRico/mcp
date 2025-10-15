@@ -1,6 +1,5 @@
 import dspy
 import json
-import os
 from typing import List, Dict, Optional
 import logging
 
@@ -16,44 +15,43 @@ class RAGService:
         self.api_key = api_key
         self.log = log or logging.getLogger("plugins.mcp")
         
-        dspy.configure(lm=dspy.LM(
-            model="gpt-4o",
-            api_key=self.api_key,
-            temperature=0.5,
-        ))
-        
         self.log.info(f"Loading STIX bundle from: {stix_bundle_path}")
         
-        # Initialize with STIX bundle if provided
+        # Initialize with STIX bundle if provided (single file)
         if stix_bundle_path:
             self.load_stix_bundle(stix_bundle_path)
     
-    def load_stix_bundle(self, stix_bundle_path: str):
-        """Load STIX bundle from file path."""
+    def load_stix_bundle(self, stix_bundle_path: str, embed_model: str = 'openai/text-embedding-3-small'):
+        """Load STIX bundle from file path and build embeddings."""
         try:
             with open(stix_bundle_path, 'r') as f:
                 stix_bundle = json.load(f)
-            self.initialize_from_bundle(stix_bundle)
+            self.initialize_from_bundles([stix_bundle], embed_model=embed_model)
         except FileNotFoundError:
             raise FileNotFoundError(f"STIX bundle not found at: {stix_bundle_path}")
         except json.JSONDecodeError:
             raise ValueError(f"Invalid JSON in STIX bundle: {stix_bundle_path}")
     
-    def initialize_from_bundle(self, stix_bundle: dict):
-        """Initialize the RAG service with a STIX bundle."""
-        self.corpus, self.adv_step = self.extract_text_chunks(stix_bundle)
+    def initialize_from_bundles(self, stix_bundles: List[dict], embed_model: str = 'openai/text-embedding-3-small'):
+        """Initialize the RAG service with multiple STIX bundles and create retriever."""
+        all_corpus = []
+        all_adv_step = {}
+        for bundle in stix_bundles:
+            corpus, adv_step = self.extract_text_chunks(bundle)
+            all_corpus.extend(corpus)
+            all_adv_step.update(adv_step)
+
+        self.corpus = all_corpus
+        self.adv_step = all_adv_step
         
-        self.log.info("Initializing STIX bundle")
-        self.log.debug("[RAG] " + "="*50)
-        
-        embedder = dspy.Embedder('openai/text-embedding-3-small', api_key=self.api_key)
-        self.log.info(f"Created embedder: {embedder}")
+        self.log.info("Initializing embeddings and retriever for STIX corpus")
+        embedder = dspy.Embedder(embed_model, api_key=self.api_key)
         self.search = dspy.retrievers.Embeddings(
             corpus=self.corpus,
             embedder=embedder, 
             k=self.topk_objects_to_retrieve,
         )
-        self.log.info(f"[RAG] Initialized search retriever: {self.search}")
+        self.log.info(f"[RAG] Initialized search retriever: {self.search} with model {embed_model} and k={self.topk_objects_to_retrieve}")
     
     def extract_text_chunks(self, stix_bundle: dict) -> tuple[List[str], Dict[str, str]]:
         """Extract text chunks from STIX bundle objects."""
@@ -140,21 +138,19 @@ class RAGService:
             "search_results": cti_results,
             "detailed_context": detailed_context,
             "query": task,
-            "thoughts": thoughts  # <-- this is what Stage should display
+            "thoughts": thoughts  # <-- used for Stage/Thoughts display
         }
 
 
 # Legacy functions for backward compatibility
 def search_cti_title(query: str) -> list[str]:
     """Legacy function - use RAGService instead."""
-    # This will only work if a global RAG service is initialized
     if 'global_rag_service' in globals():
         return global_rag_service.search_cti_title(query)
     return ["RAG service not initialized"]
 
 def search_cti_data_by_title(name: str) -> str:
     """Legacy function - use RAGService instead."""
-    # This will only work if a global RAG service is initialized
     if 'global_rag_service' in globals():
         return global_rag_service.search_cti_data_by_title(name)
     return "RAG service not initialized"
