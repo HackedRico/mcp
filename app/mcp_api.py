@@ -133,6 +133,101 @@ class McpAPI:
             self.log.error(f"[MCP] Error listing RAG files: {e}")
             return web.json_response({"error": str(e)}, status=500)
 
+    async def list_runs(self, request):
+        """List all MLflow runs with basic information."""
+        try:
+            # Get optional query parameters for filtering/pagination
+            limit = int(request.query.get("limit", 100))
+            offset = int(request.query.get("offset", 0))
+
+            client = mlflow.tracking.MlflowClient()
+
+            # Get all experiments (in case there are multiple)
+            experiments = client.search_experiments()
+
+            all_runs = []
+            for experiment in experiments:
+                # Search runs in this experiment
+                runs = client.search_runs(
+                    experiment_ids=[experiment.experiment_id],
+                    order_by=["start_time DESC"],
+                    max_results=1000  # Get a large number, we'll paginate ourselves
+                )
+
+                for run in runs:
+                    run_info = run.info
+                    run_data = run.data
+
+                    # Extract key information
+                    run_record = {
+                        "run_id": run_info.run_id,
+                        "experiment_id": run_info.experiment_id,
+                        "status": run_info.status,
+                        "start_time": run_info.start_time,
+                        "end_time": run_info.end_time,
+                        "run_name": run_data.tags.get("mlflow.runName", "Unnamed Run"),
+                        "prompt": run_data.params.get("prompt", ""),
+                        "stage": run_data.tags.get("stage", ""),
+                        "model": run_data.params.get("model", ""),
+                        "process_result": run_data.params.get("process_result", ""),
+                    }
+                    all_runs.append(run_record)
+
+            # Sort by start_time descending (newest first)
+            all_runs.sort(key=lambda x: x["start_time"], reverse=True)
+
+            # Apply pagination
+            paginated_runs = all_runs[offset:offset + limit]
+
+            return web.json_response({
+                "runs": paginated_runs,
+                "total": len(all_runs),
+                "limit": limit,
+                "offset": offset
+            })
+        except Exception as e:
+            self.log.error(f"[MCP] Error listing runs: {e}")
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def get_run_detail(self, request):
+        """Get detailed information for a specific run including full trajectory."""
+        run_id = request.query.get("run_id")
+        if not run_id:
+            return web.json_response({"error": "Missing run_id"}, status=400)
+
+        try:
+            client = mlflow.tracking.MlflowClient()
+            run = client.get_run(run_id)
+
+            # Extract all trajectory data (thoughts, observations, tool calls)
+            trajectory = {
+                k: v for k, v in run.data.tags.items()
+                if k.startswith("thought_") or k.startswith("observation_") or
+                   k.startswith("tool_name_") or k.startswith("tool_args_")
+            }
+
+            # Build comprehensive response
+            response = {
+                "run_id": run_id,
+                "status": run.info.status,
+                "start_time": run.info.start_time,
+                "end_time": run.info.end_time,
+                "run_name": run.data.tags.get("mlflow.runName", "Unnamed Run"),
+                "experiment_id": run.info.experiment_id,
+                "params": dict(run.data.params),
+                "tags": dict(run.data.tags),
+                "trajectory": trajectory,
+                "stage": run.data.tags.get("stage"),
+                "reasoning": run.data.tags.get("reasoning"),
+                "prompt": run.data.params.get("prompt"),
+                "process_result": run.data.params.get("process_result"),
+            }
+
+            return web.json_response(response)
+        except Exception as e:
+            self.log.error(f"[MCP] Error fetching run detail {run_id}: {e}")
+            return web.json_response({"error": str(e)}, status=500)
+
 def setup_routes(app, mcp_api: McpAPI):
     app.router.add_post("/plugin/mcp/execute", mcp_api.execute)
     app.router.add_get("/plugin/mcp/status", mcp_api.status)

@@ -1,13 +1,20 @@
 import dspy
-import yaml
+import os
 
-with open("/home/kali/coding/caldera/plugins/mcp/conf/default.yml", 'r') as file:
-    config = yaml.safe_load(file)
-    lm = dspy.LM(config['factory']['model'], api_key=config['factory']['api_key'], temperature=config['factory']['temperature'])
-    dspy.configure(lm=lm)
+# Configure DSPy from environment variables (passed from parent process)
+# This allows the MCP server subprocess to use the same API key as the main workflow
+def configure_dspy_from_env():
+    model = os.environ.get('DSPY_MODEL', 'gpt-4o')
+    api_key = os.environ.get('DSPY_API_KEY', '')
+    temperature = float(os.environ.get('DSPY_TEMPERATURE', '0.5'))
+    max_tokens = int(os.environ.get('DSPY_MAX_TOKENS', '10000'))
 
-#lm = dspy.LM(model="gpt-4o", api_key="***REDACTED-OPENAI-KEY***")
-#dspy.configure(lm=lm)
+    if api_key:  # Only configure if we have an API key
+        lm = dspy.LM(model=model, api_key=api_key, temperature=temperature, max_tokens=max_tokens)
+        dspy.configure(lm=lm)
+
+# Configure on import if environment variables are present
+configure_dspy_from_env()
 
 class RankApproaches(dspy.Signature):
     """Rank the approaches to create the command."""

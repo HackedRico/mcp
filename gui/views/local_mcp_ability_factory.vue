@@ -71,110 +71,14 @@
 
         <div class="column is-one-third">
           <div class="box">
-            <h3 class="title is-5 has-text-primary">Model Config</h3>
-
-            <div class="field">
-              <label class="label">Model</label>
-              <div class="control">
-                <input
-                  class="input"
-                  type="text"
-                  v-model="modelName"
-                  placeholder="e.g., gpt-4o"
-                  :disabled="isLoading"
-                />
-              </div>
+            <div class="is-flex is-align-items-center is-justify-content-space-between mb-3">
+              <h3 class="title is-5 has-text-primary mb-0">RAG Data</h3>
+              <span class="icon is-clickable" @click="ragBoxOpen = !ragBoxOpen">
+                <font-awesome-icon :icon="['fas', ragBoxOpen ? 'minus' : 'plus']" />
+              </span>
             </div>
 
-            <div class="field">
-              <label class="label">Temperature</label>
-              <div class="control">
-                <input
-                  class="input"
-                  type="number"
-                  v-model.number="temperature"
-                  step="0.1"
-                  min="0.1"
-                  max="1"
-                  :disabled="isLoading"
-                />
-              </div>
-            </div>
-
-            <div class="field">
-              <label class="label">API Key</label>
-              <div class="control">
-                <input
-                  class="input"
-                  type="password"
-                  v-model="apiKey"
-                  placeholder="Enter API key"
-                  :disabled="isLoading"
-                />
-              </div>
-            </div>
-
-            <div class="field">
-              <label class="label">Max Tool Calls</label>
-              <div class="control">
-                <input
-                  class="input"
-                  type="number"
-                  v-model.number="maxToolCalls"
-                  min="1"
-                  step="1"
-                  :disabled="isLoading"
-                />
-              </div>
-            </div>
-
-            <div class="field">
-              <label class="label">Max Tokens</label>
-              <div class="control">
-                <input
-                  class="input"
-                  type="number"
-                  v-model.number="maxTokens"
-                  min="1000"
-                  step="1000"
-                  :disabled="isLoading"
-                />
-              </div>
-            </div>
-
-            <div class="field">
-              <label class="label">RAG Embed Model</label>
-              <div class="control">
-                <input
-                  class="input"
-                  type="text"
-                  v-model="ragEmbedModel"
-                  placeholder="openai/text-embedding-3-small"
-                  :disabled="isLoading"
-                />
-              </div>
-            </div>
-
-            <div class="field">
-              <label class="label">RAG TopK</label>
-              <div class="control">
-                <input
-                  class="input"
-                  type="number"
-                  v-model.number="ragTopK"
-                  min="1"
-                  max="30"
-                  step="1"
-                  :disabled="isLoading"
-                />
-              </div>
-            </div>
-          </div>
-
-          <div class="box">
-            <h3 class="title is-5 has-text-primary">RAG Data</h3>
-
-            <div class="field">
+            <div v-show="ragBoxOpen" class="field">
               <div class="file has-name is-fullwidth">
                 <label class="file-label">
                   <input
@@ -199,7 +103,7 @@
               </div>
             </div>
 
-            <div class="buttons">
+            <div v-show="ragBoxOpen" class="buttons">
               <button class="button is-primary"
                       @click="uploadRag"
                       :disabled="!selectedFile || isUploading">
@@ -213,14 +117,14 @@
               </button>
             </div>
 
-            <div v-if="uploadMessage" class="notification is-success">
+            <div v-show="ragBoxOpen" v-if="uploadMessage" class="notification is-success">
               {{ uploadMessage }}
             </div>
-            <div v-if="uploadError" class="notification is-danger">
+            <div v-show="ragBoxOpen" v-if="uploadError" class="notification is-danger">
               {{ uploadError }}
             </div>
 
-            <div class="mt-3">
+            <div v-show="ragBoxOpen" class="mt-3">
               <strong>Uploaded Files</strong>
               <div class="mt-2" style="max-height: 240px; overflow: auto;">
                 <label
@@ -314,6 +218,8 @@ import { FontAwesomeIcon } from '@fortawesome/vue-fontawesome';
 import { faPlus, faMinus } from '@fortawesome/free-solid-svg-icons'
 
 const $api = inject("$api")
+const globalConfig = inject("mcpGlobalConfig")
+
 const inputText = ref('')
 const submittedPrompt = ref('')
 const responseMessage = ref('')
@@ -332,21 +238,14 @@ const animatedStatus = ref('RUNNING')
 const parsedAbilityLines = ref([])
 const parsedAdversaryLine = ref('')
 const collapsibleBoxOpen = ref(true)
+const ragBoxOpen = ref(true)
 const stageQueue = ref([])
 let stageInterval = null
 const displayedStage = ref('')
 let hasShownInitialMessage = false
 
-const modelName = ref('gpt-4o')
-const temperature = ref(0.5)
-const apiKey = ref('')
-const maxToolCalls = ref(5)
-const maxTokens = ref(10000)
-
-// RAG selection and options
-const selectedRag = ref([])              // filenames selected for this run
-const ragEmbedModel = ref('openai/text-embedding-3-small')
-const ragTopK = ref(5)
+// RAG selection (filenames selected for this run)
+const selectedRag = ref([])
 
 let dotCount = 0
 let dotInterval = null
@@ -387,21 +286,42 @@ async function handleSubmit() {
     if (stageInterval) clearInterval(stageInterval)
 
     const useRag = selectedRag.value.length > 0
-    const payload = { 
-      text: inputText.value, 
+
+    // Debug: Log global config state
+    console.log("[MCP Factory] Global config state:", {
+      modelName: globalConfig.modelName,
+      temperature: globalConfig.temperature,
+      hasApiKey: !!globalConfig.apiKey,
+      apiKeyLength: globalConfig.apiKey?.length || 0,
+      maxToolCalls: globalConfig.maxToolCalls,
+      maxTokens: globalConfig.maxTokens,
+      ragEmbedModel: globalConfig.ragEmbedModel,
+      ragTopK: globalConfig.ragTopK
+    })
+
+    const payload = {
+      text: inputText.value,
       type: useRag ? 'rag_factory' : 'factory',
       config: {
-        model: modelName.value,
-        temperature: temperature.value,
-        api_key: apiKey.value,
-        max_tool_calls: maxToolCalls.value,
-        max_tokens: maxTokens.value,
+        model: globalConfig.modelName,
+        temperature: globalConfig.temperature,
+        api_key: globalConfig.apiKey,
+        max_tool_calls: globalConfig.maxToolCalls,
+        max_tokens: globalConfig.maxTokens,
         rag_files: selectedRag.value,
-        rag_embed_model: ragEmbedModel.value,
-        rag_topk: ragTopK.value
+        rag_embed_model: globalConfig.ragEmbedModel,
+        rag_topk: globalConfig.ragTopK
       }
     }
-    console.log("Submitting factory payload:", payload)
+
+    // Debug: Log payload with redacted API key
+    console.log("[MCP Factory] Submitting payload:", {
+      ...payload,
+      config: {
+        ...payload.config,
+        api_key: payload.config.api_key ? `***PRESENT (${payload.config.api_key.length} chars)***` : '***MISSING***'
+      }
+    })
     const response = await $api.post('/plugin/mcp/execute', payload)
 
     runId.value = response.data.run_id

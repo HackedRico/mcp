@@ -38,13 +38,22 @@ def configure_llm(llm_config, use_mock=False):
     
     dspy.configure(lm=lm)
 
-def get_env():
+def get_env(lm_settings=None):
     env = os.environ.copy()
     venv_site_packages = os.path.join(sys.prefix, "Lib", "site-packages")
     if 'PYTHONPATH' in env:
         env['PYTHONPATH'] = f"{venv_site_packages}:{env['PYTHONPATH']}"
     else:
         env['PYTHONPATH'] = venv_site_packages
+
+    # Pass LLM config to subprocess via environment variables
+    if lm_settings:
+        # Use 'or' to handle None values and ensure we always get strings
+        env['DSPY_MODEL'] = str(lm_settings.get('model') or 'gpt-4o')
+        env['DSPY_API_KEY'] = str(lm_settings.get('api_key') or '')
+        env['DSPY_TEMPERATURE'] = str(lm_settings.get('temperature') or 0.5)
+        env['DSPY_MAX_TOKENS'] = str(lm_settings.get('max_tokens') or 10000)
+
     return env
 
 mlflow.set_tracking_uri("http://localhost:5000")
@@ -52,11 +61,6 @@ mlflow.set_experiment("caldera-mcp-FACTORY-client-1")
 # mlflow.dspy.autolog()
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
-server_params = StdioServerParameters(
-    command="python",
-    args=[current_dir+"/mcp_server.py"],
-    env=get_env(),
-)
 
 class DSPyCalderaFactoryClient(dspy.Signature):
     """You are an ability factory for the Caldera adversary emulation platform.  You are given a list of tools to handle user requests and control Caldera via the
@@ -123,22 +127,39 @@ def format_rag_context(rag_context):
 async def run(adversary_emulation_task: str, lm_obj = None, rag_context=None, run_id=None):
     # Build LM settings safely (support defaults)
     lm_settings = {}
+    max_tool_calls = 5  # Default value
     if lm_obj:
         lm_obj_safe = copy.deepcopy(lm_obj) or {}
         lm_settings = {
-            "model": lm_obj_safe.get("model", "gpt-4o"),
-            "api_key": lm_obj_safe.get("api_key", ""),
-            "temperature": lm_obj_safe.get("temperature", 0.5),
-            "max_tokens": lm_obj_safe.get("max_tokens", 10000),
+            "model": lm_obj_safe.get("model") or "gpt-4o",
+            "api_key": lm_obj_safe.get("api_key") or "",
+            "temperature": lm_obj_safe.get("temperature") or 0.5,
+            "max_tokens": lm_obj_safe.get("max_tokens") or 10000,
         }
+        max_tool_calls = lm_obj_safe.get("max_tool_calls") or 5
     else:
         llm_config = get_llm_config()
         lm_settings = {
-            "model": llm_config.get("model", "gpt-4o"),
-            "api_key": llm_config.get("api_key", ""),
-            "temperature": llm_config.get("temperature", 0.5),
-            "max_tokens": llm_config.get("max_tokens", 10000),
+            "model": llm_config.get("model") or "gpt-4o",
+            "api_key": llm_config.get("api_key") or "",
+            "temperature": llm_config.get("temperature") or 0.5,
+            "max_tokens": llm_config.get("max_tokens") or 10000,
         }
+        max_tool_calls = llm_config.get("max_tool_calls") or 5
+
+    # Validate API key is provided
+    if not lm_settings.get("api_key"):
+        error_msg = "API key is required but not provided. Please set your API key in the Global Model Configuration."
+        print(f"[MCP] ERROR: {error_msg}")
+        if not run_id:
+            run = mlflow.start_run(run_name="MCP Ability Factory")
+            run_id = run.info.run_id
+        mlflow.set_tag("status", "failed")
+        mlflow.set_tag("stage", "error")
+        mlflow.log_param("error", error_msg)
+        mlflow.log_param("prompt", adversary_emulation_task)
+        mlflow.end_run()
+        raise ValueError(error_msg)
 
     # Use the passed-in run_id to continue the MLflow run if provided
     created_local_run = False
@@ -150,6 +171,13 @@ async def run(adversary_emulation_task: str, lm_obj = None, rag_context=None, ru
     mlflow.set_tag("status", "running")
     mlflow.set_tag("stage", "initializing")
     mlflow.log_param("prompt", adversary_emulation_task)
+
+    # Create server params with LLM settings passed via environment
+    server_params = StdioServerParameters(
+        command="python",
+        args=[current_dir+"/mcp_server.py"],
+        env=get_env(lm_settings),
+    )
 
     try:
         async with stdio_client(server_params) as (read, write):
@@ -174,12 +202,20 @@ async def run(adversary_emulation_task: str, lm_obj = None, rag_context=None, ru
                     if rag_context:
                         signature = DSPyCalderaFactoryClientWithRAG
                         formatted_context = format_rag_context(rag_context)
-                        react = dspy.ReAct(signature, tools=dspy_tools)
+
+                        # Log CTI context being sent to LLM for verification
+                        mlflow.log_param("cti_context_preview", formatted_context[:1000])  # First 1000 chars
+                        mlflow.set_tag("cti_context_length", len(formatted_context))
+                        mlflow.set_tag("cti_search_results_count", len(rag_context.get("search_results", [])))
+                        mlflow.set_tag("cti_detailed_context_count", len(rag_context.get("detailed_context", [])))
+                        print(f"[MCP] Passing CTI context to LLM ({len(formatted_context)} chars)")
+
+                        react = dspy.ReAct(signature, tools=dspy_tools, max_iters=max_tool_calls)
                         mlflow.set_tag("stage", "executing DSPy ReAct with RAG")
                         result = await react.acall(adversary_emulation_task=adversary_emulation_task, cti_context=formatted_context)
                     else:
                         signature = DSPyCalderaFactoryClient
-                        react = dspy.ReAct(signature, tools=dspy_tools)
+                        react = dspy.ReAct(signature, tools=dspy_tools, max_iters=max_tool_calls)
                         mlflow.set_tag("stage", "executing DSPy ReAct")
                         result = await react.acall(adversary_emulation_task=adversary_emulation_task)
 

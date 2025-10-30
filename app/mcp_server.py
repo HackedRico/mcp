@@ -441,19 +441,19 @@ def create_windows_ability(
 def create_linux_ability(
     name: str,
     description: str,
-    command: str,
+    command_description: str,
     tactic: str,
     technique_name: str,
     technique_id: str = None,
     payloads: list = None,
 ):
     """
-    Create a new ability for linux with the specified parameters.
+    Create a new linux ability with the specified parameters.
 
     Args:
         name: Name of the ability
         description: Description of what the ability does
-        command: The command to execute
+        command_description: Detailed description of the command to use in the linux ability
         tactic: MITRE ATT&CK tactic (e.g., 'privilege-escalation', 'discovery')
         technique_name: Name of the MITRE ATT&CK technique
         technique_id: Optional MITRE ATT&CK technique ID (e.g., 'T1548.002')
@@ -463,12 +463,13 @@ def create_linux_ability(
         The response from the Caldera API
     """
     ability_id = str(uuid.uuid4())
+    created_command = create_command(command_description, "linux")
 
     # Create the executor object with default values for optional fields
     executor = {
         "name": "linux",
         "platform": "sh",
-        "command": command,
+        "command": created_command,
         "code": None,
         "language": None,
         "build_target": None,

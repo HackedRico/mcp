@@ -35,6 +35,7 @@ class MCPService(BaseService):
             "api_key": model_config.get("api_key"),
             "temperature": model_config.get("temperature"),
             "max_tokens": model_config.get("max_tokens"),
+            "max_tool_calls": model_config.get("max_tool_calls"),
         }
         return lm
 
@@ -115,11 +116,19 @@ class MCPService(BaseService):
                             topk=rag_topk or 5
                         )
                         rag_context = rag.get_context_for_task(prompt)
-                        # Log RAG retrieval as tool usage
+                        # Log RAG retrieval process (use different namespace to avoid collision with LLM thoughts)
                         for i, thought in enumerate(rag_context.get("thoughts", [])):
-                            mlflow.set_tag(f"thought_{i}", thought)
-                        mlflow.set_tag("tool_name_0", "get_context_for_task")
-                        mlflow.set_tag("tool_args_0", json.dumps({"query": prompt, "rag_files": rag_files}))
+                            mlflow.set_tag(f"rag_retrieval_step_{i}", thought)
+
+                        # Log which CTI objects were retrieved
+                        search_results = rag_context.get('search_results', [])
+                        for i, result in enumerate(search_results):
+                            result_name = result.split(" | ")[0] if " | " in result else result[:100]
+                            mlflow.set_tag(f"rag_retrieved_object_{i}", result_name)
+
+                        mlflow.set_tag("rag_tool_name", "get_context_for_task")
+                        mlflow.set_tag("rag_tool_args", json.dumps({"query": prompt, "rag_files": rag_files}))
+                        self.log.info(f"[MCP] RAG retrieved {len(search_results)} CTI objects")
                     except Exception as e:
                         self.log.warning(f"[MCP] RAG build/error: {e}")
 
@@ -128,10 +137,10 @@ class MCPService(BaseService):
                 if use_rag:
                     if focus in [ExecuteStyle.LLMplanner.value, ExecuteStyle.RAGplanner.value]:
                         self.log.info(f"[MCP] Executing RAG-enhanced planner with prompt: {prompt}")
-                        result = await planner_run(prompt, rag_context=rag_context, run_id=run_id)
+                        result = await planner_run(prompt, lm_obj, rag_context=rag_context, run_id=run_id)
                     else:
                         self.log.info(f"[MCP] Executing RAG-enhanced factory with prompt: {prompt}")
-                        result = await factory_run(prompt, rag_context=rag_context, run_id=run_id)
+                        result = await factory_run(prompt, lm_obj, rag_context=rag_context, run_id=run_id)
                 else:
                     if focus == ExecuteStyle.LLMplanner.value:
                         self.log.info(f"[MCP] Executing planner with prompt: {prompt}")
@@ -142,8 +151,10 @@ class MCPService(BaseService):
 
                 mlflow.set_tag("stage", "complete")
                 mlflow.set_tag("status", "success")
-                # Align with status API
-                mlflow.log_param("process_result", json.dumps(result.get("process_result", {})))
+                # Store process_result as a tag instead of param to avoid conflicts
+                # (the client already logs it as a param)
+                if result.get("process_result"):
+                    mlflow.set_tag("process_result_summary", str(result.get("process_result", ""))[:250])
 
         except Exception as e:
             self.log.error(f"[MCP] Execution failed: {e}")
