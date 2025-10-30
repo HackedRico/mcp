@@ -5,18 +5,16 @@ from plugins.mcp.app.mcp_factory_client import run as factory_run
 from plugins.mcp.app.mcp_planner_client import run as planner_run
 from plugins.mcp.app.rag import RAGService
 from enum import Enum
-import os
 import mlflow
 import asyncio
 import json
-
+from pathlib import Path
 
 class ExecuteStyle(Enum):
     LLMfactory = "factory"
     LLMplanner = "planner"
     RAGplanner = "rag_planner"
     RAGfactory = "rag_factory"
-
 
 class MCPService(BaseService):
     def __init__(self, services):
@@ -27,55 +25,60 @@ class MCPService(BaseService):
         self.auth_svc = services.get("auth_svc")
         self.log = logging.getLogger("plugins.mcp")
 
-        # need to get api key from gui?
-        api_key = "***REDACTED-OPENAI-KEY***"
-        self.lm = dspy.LM(
-            model="gpt-4o",
-            api_key=api_key,
-            temperature=0.5,
-        )
-
-        # Initialize RAG service
-        self.log.info(f"[MCP] Initializing RAG")
+        # Build RAG per run when requested
         self.rag_service = None
-
-        stix_bundle_path = os.path.join(os.getcwd(), "plugins", "mcp", "data", "stix_bundle.json")
-        self.log.info(f"stix_bundle_path: {stix_bundle_path}")
-        self.log.info(f"current_dir: {os.getcwd()}")
-        if os.path.exists(stix_bundle_path):
-            try:
-                self.rag_service = RAGService(stix_bundle_path, api_key=api_key, log=self.log)
-                self.log.info("[MCP] RAG service initialized with STIX bundle")
-            except Exception as e:
-                self.log.warning(f"[MCP] Failed to initialize RAG service: {e}")
-        else:
-            self.log.warning(f"[MCP] STIX bundle not found at {stix_bundle_path}")
-
-
         self.log.info("[MCP] Initialized MCPService")
 
-    async def execute(self, focus: str, prompt: str, file: dict = None):
+    def _create_dspy_client(self, model_config: dict):
+        lm = {
+            "model": model_config.get("model"),
+            "api_key": model_config.get("api_key"),
+            "temperature": model_config.get("temperature"),
+            "max_tokens": model_config.get("max_tokens"),
+            "max_tool_calls": model_config.get("max_tool_calls"),
+        }
+        return lm
+
+    async def execute(self, focus: str, prompt: str, model_config: dict, file: dict = None):
         """Start MLflow run and launch async execution."""
         run = mlflow.start_run(run_name="MCP Execution")
         run_id = run.info.run_id
         mlflow.end_run()  # Immediately end run so polling can begin
 
-        # Optional: collect RAG context
-        rag_context = None
-        if focus in [ExecuteStyle.RAGplanner.value, ExecuteStyle.RAGfactory.value] and self.rag_service:
-            try:
-                rag_context = self.rag_service.get_context_for_task(prompt)
-                self.log.info("[MCP] RAG context retrieved")
-            except Exception as e:
-                self.log.warning(f"[MCP] RAG context error: {e}")
+        api_key = (model_config or {}).get("api_key")
+        dspy_client = None
+        if api_key:
+            dspy_client = self._create_dspy_client(model_config)
 
-        # Run logic in background
-        asyncio.create_task(self._run_execution(focus, prompt, rag_context, run_id))
-
+        # Launch background run, pass full config for RAG options
+        asyncio.create_task(self._run_execution(
+            focus=focus,
+            prompt=prompt,
+            run_id=run_id,
+            lm_obj=dspy_client,
+            run_config=model_config or {}
+        ))
         return {"run_id": run_id}
 
-    async def _run_execution(self, focus, prompt, rag_context, run_id):
+    def _build_rag_service_from_files(self, filenames, api_key: str, embed_model: str, topk: int):
+        base_dir = Path(__file__).resolve().parent.parent / "data"
+        bundles = []
+        for name in filenames or []:
+            path = base_dir / name
+            if not path.exists():
+                raise FileNotFoundError(f"RAG file not found: {path}")
+            with open(path, "r", encoding="utf-8") as f:
+                bundles.append(json.load(f))
+
+        rag = RAGService(api_key=api_key, log=self.log)
+        if topk:
+            rag.topk_objects_to_retrieve = int(topk)
+        rag.initialize_from_bundles(bundles, embed_model=embed_model or 'openai/text-embedding-3-small')
+        return rag
+
+    async def _run_execution(self, focus, prompt, run_id, lm_obj=None, run_config: dict = None):
         """Executes the full DSPy logic in background and tracks via MLflow."""
+        run_config = run_config or {}
         try:
             # Force clear any stale MLflow context from main thread
             mlflow.end_run()
@@ -83,40 +86,75 @@ class MCPService(BaseService):
                 mlflow.set_tag("stage", "initializing")
                 mlflow.log_param("prompt", prompt)
 
-                if focus == ExecuteStyle.LLMfactory.value:
-                    self.log.info(f"[MCP] Executing factory with prompt: {prompt}")
-                    result = await factory_run(prompt, run_id=run_id)
+                # Configure LM globally if provided
+                if lm_obj and lm_obj.get("api_key"):
+                    try:
+                        dspy.configure(lm=dspy.LM(
+                            model=lm_obj.get("model"),
+                            api_key=lm_obj.get("api_key"),
+                            temperature=lm_obj.get("temperature"),
+                            max_tokens=lm_obj.get("max_tokens"),
+                        ))
+                    except Exception as e:
+                        self.log.warning(f"[MCP] Failed to configure LM: {e}")
 
-                elif focus == ExecuteStyle.LLMplanner.value:
-                    self.log.info(f"[MCP] Executing planner with prompt: {prompt}")
-                    result = await planner_run(prompt, run_id=run_id)
+                rag_files = run_config.get("rag_files") or []
+                rag_embed_model = run_config.get("rag_embed_model") or 'openai/text-embedding-3-small'
+                rag_topk = run_config.get("rag_topk")
 
-                elif focus == ExecuteStyle.RAGplanner.value:
-                    self.log.info(f"[MCP] Executing RAG-enhanced planner with prompt: {prompt}")
-                    # Log RAG context into MLflow
-                    if rag_context:
+                # Use RAG if explicitly requested via focus or if files were selected
+                use_rag = (focus in [ExecuteStyle.RAGplanner.value, ExecuteStyle.RAGfactory.value]) or bool(rag_files)
+
+                rag_context = None
+                if use_rag and rag_files:
+                    try:
+                        self.log.info(f"[MCP] Building RAG from files: {rag_files}")
+                        rag = self._build_rag_service_from_files(
+                            filenames=rag_files,
+                            api_key=(lm_obj or {}).get("api_key"),
+                            embed_model=rag_embed_model,
+                            topk=rag_topk or 5
+                        )
+                        rag_context = rag.get_context_for_task(prompt)
+                        # Log RAG retrieval process (use different namespace to avoid collision with LLM thoughts)
                         for i, thought in enumerate(rag_context.get("thoughts", [])):
-                            mlflow.set_tag(f"thought_{i}", thought)
-                        mlflow.set_tag("tool_name_0", "get_context_for_task")
-                        mlflow.set_tag("tool_args_0", json.dumps({"query": prompt}))
-                    result = await planner_run(prompt, rag_context=rag_context, run_id=run_id)
+                            mlflow.set_tag(f"rag_retrieval_step_{i}", thought)
 
-                elif focus == ExecuteStyle.RAGfactory.value:
-                    self.log.info(f"[MCP] Executing RAG-enhanced factory with prompt: {prompt}")
-                    # Log RAG context into MLflow
-                    if rag_context:
-                        for i, thought in enumerate(rag_context.get("thoughts", [])):
-                            mlflow.set_tag(f"thought_{i}", thought)
-                        mlflow.set_tag("tool_name_0", "get_context_for_task")
-                        mlflow.set_tag("tool_args_0", json.dumps({"query": prompt}))
-                    result = await factory_run(prompt, rag_context=rag_context, run_id=run_id)
+                        # Log which CTI objects were retrieved
+                        search_results = rag_context.get('search_results', [])
+                        for i, result in enumerate(search_results):
+                            result_name = result.split(" | ")[0] if " | " in result else result[:100]
+                            mlflow.set_tag(f"rag_retrieved_object_{i}", result_name)
 
+                        mlflow.set_tag("rag_tool_name", "get_context_for_task")
+                        mlflow.set_tag("rag_tool_args", json.dumps({"query": prompt, "rag_files": rag_files}))
+                        self.log.info(f"[MCP] RAG retrieved {len(search_results)} CTI objects")
+                    except Exception as e:
+                        self.log.warning(f"[MCP] RAG build/error: {e}")
+
+                # Execute appropriate pipeline
+                result = {}
+                if use_rag:
+                    if focus in [ExecuteStyle.LLMplanner.value, ExecuteStyle.RAGplanner.value]:
+                        self.log.info(f"[MCP] Executing RAG-enhanced planner with prompt: {prompt}")
+                        result = await planner_run(prompt, lm_obj, rag_context=rag_context, run_id=run_id)
+                    else:
+                        self.log.info(f"[MCP] Executing RAG-enhanced factory with prompt: {prompt}")
+                        result = await factory_run(prompt, lm_obj, rag_context=rag_context, run_id=run_id)
                 else:
-                    raise ValueError(f"Unsupported execution style: {focus}")
+                    if focus == ExecuteStyle.LLMplanner.value:
+                        self.log.info(f"[MCP] Executing planner with prompt: {prompt}")
+                        result = await planner_run(prompt, lm_obj, run_id=run_id)
+                    else:
+                        self.log.info(f"[MCP] Executing factory with prompt: {prompt}")
+                        result = await factory_run(prompt, lm_obj, run_id=run_id)
 
                 mlflow.set_tag("stage", "complete")
                 mlflow.set_tag("status", "success")
-                mlflow.log_param("result", json.dumps(result.get("process_result", {})))
+                # Store process_result as a tag instead of param to avoid conflicts
+                # (the client already logs it as a param)
+                if result.get("process_result"):
+                    mlflow.set_tag("process_result_summary", str(result.get("process_result", ""))[:250])
 
         except Exception as e:
             self.log.error(f"[MCP] Execution failed: {e}")

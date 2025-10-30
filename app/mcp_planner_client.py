@@ -18,40 +18,53 @@ def get_llm_config():
         print(f"[MCP] Failed to load LLM config: {e}")
         return {}
 
-def configure_llm(llm_config):
-    if llm_config.get("offline", False):
+def build_lm_from_dict(settings: dict) -> dspy.LM:
+    # Support offline mode if present
+    if settings.get("offline", False):
         os.environ["LITELLM_MODEL_METADATA_LOCAL_PATH"] = "/path/to/local.json"
-    
-    lm = dspy.LM(
-        model=llm_config.get("model", "gpt-4o"),
-        api_key=llm_config.get("api_key", ""),
-        api_base=llm_config.get("api_base")
-    )
-    dspy.configure(lm=lm)
 
-# Configure LLM from config
-llm_config = get_llm_config()
-configure_llm(llm_config)
+    # Get API key with proper None handling
+    api_key = settings.get("api_key") or ""
 
-env = os.environ.copy()
-venv_site_packages = os.path.join(sys.prefix, "Lib", "site-packages")
-if 'PYTHONPATH' in env:
-    env['PYTHONPATH'] = f"{venv_site_packages}:{env['PYTHONPATH']}"
-else:
-    env['PYTHONPATH'] = venv_site_packages
+    # Validate API key is provided
+    if not api_key:
+        raise ValueError("API key is required but not provided. Please set your API key in the Global Model Configuration.")
 
+    lm_kwargs = {
+        "model": settings.get("model") or "gpt-4o",
+        "api_key": api_key,
+        "api_base": settings.get("api_base"),
+    }
+    # Optional params if provided
+    if settings.get("temperature") is not None:
+        lm_kwargs["temperature"] = settings.get("temperature")
+    if settings.get("max_tokens") is not None:
+        lm_kwargs["max_tokens"] = settings.get("max_tokens")
+
+    return dspy.LM(**lm_kwargs)
+
+def get_env(lm_settings=None):
+    env = os.environ.copy()
+    venv_site_packages = os.path.join(sys.prefix, "Lib", "site-packages")
+    if 'PYTHONPATH' in env:
+        env['PYTHONPATH'] = f"{venv_site_packages}:{env['PYTHONPATH']}"
+    else:
+        env['PYTHONPATH'] = venv_site_packages
+
+    # Pass LLM config to subprocess via environment variables
+    if lm_settings:
+        # Use 'or' to handle None values and ensure we always get strings
+        env['DSPY_MODEL'] = str(lm_settings.get('model') or 'gpt-4o')
+        env['DSPY_API_KEY'] = str(lm_settings.get('api_key') or '')
+        env['DSPY_TEMPERATURE'] = str(lm_settings.get('temperature') or 0.5)
+        env['DSPY_MAX_TOKENS'] = str(lm_settings.get('max_tokens') or 10000)
+
+    return env
 
 mlflow.set_tracking_uri("http://localhost:5000")
 mlflow.set_experiment("caldera-mcp-client-1")
 mlflow.dspy.autolog()
 current_dir = os.path.dirname(os.path.abspath(__file__))
-
-server_params = StdioServerParameters(
-    command="python",
-    args=[current_dir+"/mcp_server.py"],
-    env=env,
-)
-
 
 class DSPyCalderaPlannerClient(dspy.Signature):
     """You are a planner for the Caldera adversary emulation platform.  You are given a list of tools to handle user requests and control Caldera via the
@@ -65,7 +78,6 @@ class DSPyCalderaPlannerClient(dspy.Signature):
             "Message that summarizes the result of the adversary emulation operation."
         )
     )
-
 
 class DSPyCalderaPlannerClientWithRAG(dspy.Signature):
     """You are a planner for the Caldera adversary emulation platform enhanced with Cyber Threat Intelligence (CTI) data.
@@ -86,45 +98,51 @@ class DSPyCalderaPlannerClientWithRAG(dspy.Signature):
         )
     )
 
-
 # Factory function to create tool functions with proper closure
 def create_tool_function(session, tool_name, tool_description):
     async def tool_function(**kwargs):
         result = await session.call_tool(tool_name, kwargs)
         return result
-    
     tool_function.__doc__ = tool_description
     return tool_function
-
 
 def format_rag_context(rag_context):
     """Format RAG context into a string for the DSPy signature."""
     if not rag_context:
         return "No CTI context available."
-    
     formatted_parts = []
-    
-    # Add search results summary
     if "search_results" in rag_context:
         formatted_parts.append("Relevant CTI findings:")
         for i, result in enumerate(rag_context["search_results"][:3], 1):
             formatted_parts.append(f"{i}. {result}")
-    
-    # Add detailed context
     if "detailed_context" in rag_context:
         formatted_parts.append("\nDetailed CTI Information:")
         for ctx in rag_context["detailed_context"]:
             formatted_parts.append(f"\n{ctx['name']}:")
             formatted_parts.append(f"{ctx['description']}")
-    
     return "\n".join(formatted_parts)
 
-async def run(adversary_emulation_task: str, rag_context=None, run_id=None):
-    # Ensure LLM is configured
-    if not dspy.settings.lm:
-        print('[MCP] Configuring LLM...')
-        llm_config = get_llm_config()
-        configure_llm(llm_config)
+async def run(adversary_emulation_task: str, lm_obj=None, rag_context=None, run_id=None):
+    """
+    lm_obj can be:
+      - a dict with keys like model, api_key, api_base, temperature, max_tokens, offline
+      - a dspy.LM instance
+      - None, to fall back to config from default.yml
+    """
+    # Resolve LM configuration
+    max_tool_calls = 5  # Default value
+    if isinstance(lm_obj, dspy.LM):
+        lm_instance = lm_obj
+        lm_settings = None  # Can't extract settings from LM instance
+    elif isinstance(lm_obj, dict):
+        lm_instance = build_lm_from_dict(lm_obj)
+        lm_settings = lm_obj
+        max_tool_calls = lm_obj.get("max_tool_calls") or 5
+    else:
+        cfg = get_llm_config()
+        lm_instance = build_lm_from_dict(cfg)
+        lm_settings = cfg
+        max_tool_calls = cfg.get("max_tool_calls") or 5
 
     # Start or resume MLflow run
     if run_id:
@@ -138,6 +156,13 @@ async def run(adversary_emulation_task: str, rag_context=None, run_id=None):
     mlflow.set_tag("stage", "initializing")
     mlflow.log_param("prompt", adversary_emulation_task)
 
+    # Create server params with LLM settings passed via environment
+    server_params = StdioServerParameters(
+        command="python",
+        args=[current_dir+"/mcp_server.py"],
+        env=get_env(lm_settings),
+    )
+
     try:
         async with stdio_client(server_params) as (read, write):
             async with ClientSession(read, write) as session:
@@ -148,25 +173,35 @@ async def run(adversary_emulation_task: str, rag_context=None, run_id=None):
                 mlflow.set_tag("stage", "listing tools")
                 tools = await session.list_tools()
 
-                mlflow.set_tag("stage", "creating DSPy ReAct instance")
                 dspy_tools = [dspy.Tool.from_mcp_tool(session, tool) for tool in tools.tools]
 
-                if rag_context:
-                    signature = DSPyCalderaPlannerClientWithRAG
-                    formatted_context = format_rag_context(rag_context)
-                    react = dspy.ReAct(signature, tools=dspy_tools)
-                    mlflow.set_tag("stage", "executing DSPy ReAct with RAG")
-                    result = await react.acall(
-                        adversary_emulation_task=adversary_emulation_task,
-                        cti_context=formatted_context
-                    )
-                else:
-                    signature = DSPyCalderaPlannerClient
-                    react = dspy.ReAct(signature, tools=dspy_tools)
-                    mlflow.set_tag("stage", "executing DSPy ReAct")
-                    result = await react.acall(
-                        adversary_emulation_task=adversary_emulation_task
-                    )
+                # Use per-call LM context, honoring lm_obj if provided
+                with dspy.context(lm=lm_instance):
+                    mlflow.set_tag("stage", "creating DSPy ReAct instance")
+                    if rag_context:
+                        signature = DSPyCalderaPlannerClientWithRAG
+                        formatted_context = format_rag_context(rag_context)
+
+                        # Log CTI context being sent to LLM for verification
+                        mlflow.log_param("cti_context_preview", formatted_context[:1000])  # First 1000 chars
+                        mlflow.set_tag("cti_context_length", len(formatted_context))
+                        mlflow.set_tag("cti_search_results_count", len(rag_context.get("search_results", [])))
+                        mlflow.set_tag("cti_detailed_context_count", len(rag_context.get("detailed_context", [])))
+                        print(f"[MCP] Passing CTI context to LLM ({len(formatted_context)} chars)")
+
+                        react = dspy.ReAct(signature, tools=dspy_tools, max_iters=max_tool_calls)
+                        mlflow.set_tag("stage", "executing DSPy ReAct with RAG")
+                        result = await react.acall(
+                            adversary_emulation_task=adversary_emulation_task,
+                            cti_context=formatted_context
+                        )
+                    else:
+                        signature = DSPyCalderaPlannerClient
+                        react = dspy.ReAct(signature, tools=dspy_tools, max_iters=max_tool_calls)
+                        mlflow.set_tag("stage", "executing DSPy ReAct")
+                        result = await react.acall(
+                            adversary_emulation_task=adversary_emulation_task
+                        )
 
                 mlflow.set_tag("stage", "completed")
                 mlflow.set_tag("status", "complete")

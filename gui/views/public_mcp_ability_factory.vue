@@ -1,77 +1,167 @@
 <template>
   <div class="is-flex is-justify-content-center" style="width: 100%;">
     <div style="width: 75%;">
+      <div class="columns is-variable is-4">
+        <div class="column is-two-thirds">
+          <div class="box">
+            <div class="is-flex is-align-items-center is-justify-content-space-between mb-3">
+              <h2 class="title is-4 has-text-primary mb-0">LLM Operation Planner</h2>
+              <span class="icon is-clickable" @click="collapsibleBoxOpen = !collapsibleBoxOpen">
+                <font-awesome-icon :icon="['fas', collapsibleBoxOpen ? 'minus' : 'plus']" />
+              </span>
+            </div>
 
-      <!-- Header + Form -->
-      <div class="box">
-        <div class="is-flex is-align-items-center is-justify-content-space-between mb-3">
-          <h2 class="title is-4 has-text-primary mb-0">LLM Operation Planner</h2>
-          <span class="icon is-clickable" @click="collapsibleBoxOpen = !collapsibleBoxOpen">
-            <font-awesome-icon :icon="['fas', collapsibleBoxOpen ? 'minus' : 'plus']" />
-          </span>
-        </div>
-        <div v-show="collapsibleBoxOpen">
-          <!-- Form Inputs and Example Prompt -->
-          <div v-if="uiPhase === 'idle' || uiPhase === 'finished'">
-            <strong>Example Starting Prompt:</strong>
-      <blockquote class="example-prompt">
-        Find some abilities that constitute a stealer adversary for linux which includes credential-access and exfiltration, then create an adversary with those abilities, then create an operation with the adversary.
-      </blockquote>
+            <div v-show="collapsibleBoxOpen">
+              <div v-if="uiPhase === 'idle' || uiPhase === 'finished'">
+                <strong>Example Starting Prompt:</strong>
+                <blockquote class="example-prompt">
+                  Find some abilities that constitute a stealer adversary for linux which includes credential-access and exfiltration, then create an adversary with those abilities, then create an operation with the adversary.
+                </blockquote>
 
-      <div class="field">
-        <div class="control">
-          <textarea
-            v-model="inputText"
-            class="textarea"
-            rows="4"
-            placeholder="Describe the complete adversary operation you'd like to plan and execute..."
-          ></textarea>
-        </div>
-      </div>
+                <div class="field">
+                  <div class="control">
+                    <textarea
+                      v-model="inputText"
+                      class="textarea"
+                      rows="4"
+                      placeholder="Describe the complete adversary operation you'd like to plan and execute..."
+                    ></textarea>
+                  </div>
+                </div>
 
-            <div class="is-flex is-justify-content-space-between is-align-items-center mt-4">
+                <div class="is-flex is-justify-content-space-between is-align-items-center mt-4">
+                  <button class="button is-light is-small" @click="$emit('back')">
+                    ← Back
+                  </button>
+                  
+                  <button class="button is-primary" @click="handleSubmit" :disabled="!inputText || isLoading">
+                    <span v-if="isLoading">Processing...</span>
+                    <span v-else>Submit</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <div class="mt-3" v-if="responseMessage || errorMessage || submittedPrompt || pollReasoning">
+              <div v-if="responseMessage" class="notification is-success">
+                {{ responseMessage }}
+              </div>
+              <div v-if="errorMessage" class="notification is-danger">
+                {{ errorMessage }}
+              </div>
+
+              <div v-if="uiPhase !== 'idle' && (submittedPrompt || pollPrompt)" class="notification is-info is-light">
+                <strong>Prompt:</strong>
+                <p class="mt-1">{{ submittedPrompt || pollPrompt }}</p>
+              </div>
+
+              <div v-if="uiPhase !== 'idle' && pollReasoning" class="reasoning-panel mt-2">
+                <strong class="reasoning-title">Reasoning</strong>
+                <pre class="reasoning-pre">{{ pollReasoning }}</pre>
+              </div>
+            </div>
+
+            <div v-if="!collapsibleBoxOpen" class="mt-3">
               <button class="button is-light is-small" @click="$emit('back')">
                 ← Back
               </button>
-              
-              <button class="button is-primary" @click="handleSubmit" :disabled="!inputText || isLoading">
-                <span v-if="isLoading">Processing...</span>
-                <span v-else>Submit</span>
-              </button>
             </div>
           </div>
-
-          <div v-if="responseMessage" class="notification is-success mt-3">
-            {{ responseMessage }}
-          </div>
-          
-          <div v-if="errorMessage" class="notification is-danger mt-3">
-            {{ errorMessage }}
-          </div>
         </div>
-        <!-- Conditional Back Button shown only when collapsibleBoxOpen is false -->
-        <div v-if="!collapsibleBoxOpen" class="mb-4">
-          <button class="button is-light is-small" @click="$emit('back')">
-            ← Back
-          </button>
+
+        <div class="column is-one-third">
+          <div class="box">
+            <div class="is-flex is-align-items-center is-justify-content-space-between mb-3">
+              <h3 class="title is-5 has-text-primary mb-0">RAG Data</h3>
+              <span class="icon is-clickable" @click="ragBoxOpen = !ragBoxOpen">
+                <font-awesome-icon :icon="['fas', ragBoxOpen ? 'minus' : 'plus']" />
+              </span>
+            </div>
+
+            <div v-show="ragBoxOpen" class="field">
+              <div class="file has-name is-fullwidth">
+                <label class="file-label">
+                  <input
+                    class="file-input"
+                    type="file"
+                    accept=".json,application/json"
+                    @change="onFileSelected"
+                    :disabled="isUploading || isLoading"
+                  />
+                  <span class="file-cta">
+                    <span class="file-icon">
+                      <font-awesome-icon :icon="['fas', 'plus']" />
+                    </span>
+                    <span class="file-label">
+                      Choose a JSON file…
+                    </span>
+                  </span>
+                  <span class="file-name">
+                    {{ selectedFile ? selectedFile.name : 'No file chosen' }}
+                  </span>
+                </label>
+              </div>
+            </div>
+
+            <div v-show="ragBoxOpen" class="buttons">
+              <button class="button is-primary"
+                      @click="uploadRag"
+                      :disabled="!selectedFile || isUploading">
+                <span v-if="isUploading">Uploading...</span>
+                <span v-else>Upload</span>
+              </button>
+              <button class="button"
+                      @click="fetchRagFiles"
+                      :disabled="isUploading || isLoading">
+                Refresh
+              </button>
+            </div>
+
+            <div v-show="ragBoxOpen" v-if="uploadMessage" class="notification is-success">
+              {{ uploadMessage }}
+            </div>
+            <div v-show="ragBoxOpen" v-if="uploadError" class="notification is-danger">
+              {{ uploadError }}
+            </div>
+
+            <div v-show="ragBoxOpen" class="mt-3">
+              <strong>Uploaded Files</strong>
+              <div class="mt-2" style="max-height: 240px; overflow: auto;">
+                <label
+                  v-for="f in ragFiles"
+                  :key="f.filename"
+                  class="checkbox mb-2 is-block"
+                >
+                  <input
+                    type="checkbox"
+                    :value="f.filename"
+                    v-model="selectedRag"
+                    :disabled="isUploading || isLoading"
+                  />
+                  <span class="ml-2">{{ f.filename }}</span>
+                  <span class="is-size-7 has-text-grey"> ({{ formatBytes(f.size) }}, {{ formatDate(f.modified) }})</span>
+                </label>
+              </div>
+              <p v-if="ragFiles.length === 0" class="has-text-grey">No files found.</p>
+              <p v-else-if="selectedRag.length" class="mt-2 is-size-7">
+                Selected: {{ selectedRag.length }} file(s)
+              </p>
+            </div>
+          </div>
         </div>
       </div>
-      
-      <!-- Polled Feedback from MLflow -->
+
       <div v-if="uiPhase === 'running' || uiPhase === 'finished'" class="mt-4">
-        <p v-if="pollPrompt" class="is-size-5 has-text-weight-medium"><strong>Prompt: </strong> {{ pollPrompt }}</p>
-        
         <p v-if="displayedStage && displayedStage.toLowerCase() !== 'completed'" class="is-size-5 has-text-weight-medium">
           <strong>Stage: </strong> {{ displayedStage }}
         </p>
 
-        <p><strong>Status: </strong> 
+        <p><strong>Status: </strong>
           <span v-if="pollStatus === 'RUNNING'">{{ animatedStatus }}</span>
           <span v-else>{{ pollStatus }}</span>
         </p>
       </div>
 
-      <!-- Thoughts Section -->
       <div v-if="uiPhase === 'running' || uiPhase === 'finished'" class="mt-5" v-show="thoughts.length">
         <div class="box">
           <h3 class="title is-5">Thoughts</h3>
@@ -80,20 +170,18 @@
               <div v-for="(sentence, sIdx) in splitSentences(thought)" :key="sIdx">
                 <p v-if="!isInjectedSentence(sentence)" class="thought-line">• {{ sentence }}</p>
 
-                <!-- If ability creation sentence -->
                 <div v-if="lastAbilitySentenceKeys.has(`${idx}-${sIdx}`)">
                   <div
                     v-for="(line, aIdx) in parsedAbilityLines"
                     :key="'ability-' + sIdx + '-' + aIdx"
-                    class="notification is-success mt-4"
-                    style="margin-left: 3rem; display: table; padding: 0.75rem 1.25rem; border-radius: 8px;"
+                    class="notification is-success mt-4 is-inline-block"
+                    style="margin-left: 3rem;"
                   >
                     {{ line }}
                   </div>
                   <br>
                 </div>
 
-                <!-- If adversary creation sentence -->
                 <div v-if="lastAdversarySentenceKeys.has(`${idx}-${sIdx}`)">
                   <div
                     class="notification is-success mt-4 is-inline-block"
@@ -129,27 +217,21 @@
         </div>
       </div>
 
-      <!-- Reasoning Section -->
-      <div v-if="uiPhase === 'running' || uiPhase === 'finished'" class="mt-5" v-show="pollReasoning">
-        <div class="box">
-          <h3 class="title is-5">Reasoning</h3>
-          <p>{{ pollReasoning }}</p>
-        </div>
-      </div>
-
     </div>
   </div>
-
 </template>
 
 
 <script setup>
-import { inject, ref, watch, computed } from "vue"
+import { inject, ref, watch, computed, onMounted } from "vue"
 import { FontAwesomeIcon } from '@fortawesome/vue-fontawesome';
 import { faPlus, faMinus } from '@fortawesome/free-solid-svg-icons'
 
 const $api = inject("$api")
+const globalConfig = inject("mcpGlobalConfig")
+
 const inputText = ref('')
+const submittedPrompt = ref('')
 const responseMessage = ref('')
 const errorMessage = ref('')
 const isLoading = ref(false)
@@ -161,20 +243,20 @@ const pollPrompt = ref('')
 const pollTrajectory = ref({})
 const pollReasoning = ref('')
 const pollFinalResult = ref('')
-const uiPhase = ref('idle')  // 'idle' | 'running' | 'finished'
+const uiPhase = ref('idle')
 const animatedStatus = ref('RUNNING')
 const parsedAbilityLines = ref([])
 const parsedAdversaryLine = ref('')
+const parsedOperationLine = ref('')
 const collapsibleBoxOpen = ref(true)
+const ragBoxOpen = ref(true)
 const stageQueue = ref([])
 let stageInterval = null
 const displayedStage = ref('')
 let hasShownInitialMessage = false
-const parsedOperationLine = ref('');
 
-
-
-
+// RAG selection (filenames selected for this run)
+const selectedRag = ref([])
 
 let dotCount = 0
 let dotInterval = null
@@ -203,23 +285,59 @@ async function handleSubmit() {
   pollFinalResult.value = ''
   pollTrajectory.value = {}
   runId.value = null
-  responseMessage.value = 'Started Creation of the Operation.'
+  responseMessage.value = 'Started creation of the operation.'
   displayedStage.value = ''
   hasShownInitialMessage = false
   stageQueue.value = []
   stageInterval = null
-  
+
+  submittedPrompt.value = inputText.value?.trim() || ''
+
   try {
     if (pollInterval) clearInterval(pollInterval)
     if (stageInterval) clearInterval(stageInterval)
 
-    let payload = { text: inputText.value, type: 'planner' }
+    const useRag = selectedRag.value.length > 0
 
+    // Debug: Log global config state
+    console.log("[MCP Planner] Global config state:", {
+      modelName: globalConfig.modelName,
+      temperature: globalConfig.temperature,
+      hasApiKey: !!globalConfig.apiKey,
+      apiKeyLength: globalConfig.apiKey?.length || 0,
+      maxToolCalls: globalConfig.maxToolCalls,
+      maxTokens: globalConfig.maxTokens,
+      ragEmbedModel: globalConfig.ragEmbedModel,
+      ragTopK: globalConfig.ragTopK
+    })
+
+    const payload = {
+      text: inputText.value,
+      type: useRag ? 'rag_planner' : 'planner',
+      config: {
+        model: globalConfig.modelName,
+        temperature: globalConfig.temperature,
+        api_key: globalConfig.apiKey,
+        max_tool_calls: globalConfig.maxToolCalls,
+        max_tokens: globalConfig.maxTokens,
+        rag_files: selectedRag.value,
+        rag_embed_model: globalConfig.ragEmbedModel,
+        rag_topk: globalConfig.ragTopK
+      }
+    }
+
+    // Debug: Log payload with redacted API key
+    console.log("[MCP Planner] Submitting payload:", {
+      ...payload,
+      config: {
+        ...payload.config,
+        api_key: payload.config.api_key ? `***PRESENT (${payload.config.api_key.length} chars)***` : '***MISSING***'
+      }
+    })
     const response = await $api.post('/plugin/mcp/execute', payload)
 
-    // ✅ Pull out run_id and start polling
     runId.value = response.data.run_id
-    
+
     pollStatusUpdates(runId.value)
     inputText.value = ''
   } catch (err) {
@@ -239,7 +357,6 @@ function pollStatusUpdates(id) {
   pollInterval = setInterval(async () => {
     try {
       const res = await $api.get('/plugin/mcp/status', { params: { run_id: id } });
-      console.log('[POLL] Status response:', res.data);
 
       pollStatus.value = res.data.status || 'unknown';
       pollPrompt.value = res.data.prompt || '';
@@ -256,7 +373,6 @@ function pollStatusUpdates(id) {
       const stage = res.data.stage;
       const stageLower = stage?.toLowerCase();
 
-      // ✅ Queue unseen, non-duplicate stages only
       if (
         stage &&
         !stageLower.includes('complete') &&
@@ -264,31 +380,24 @@ function pollStatusUpdates(id) {
         !shownStages.has(stage) &&
         !stageQueue.value.includes(stage)
       ) {
-        // If this is the first stage, show immediately
         if (!displayedStage.value && stageQueue.value.length === 0 && shownStages.size === 0) {
           displayedStage.value = stage;
           shownStages.add(stage);
-          console.log('[DISPLAY] First stage shown immediately:', stage);
         } else {
           stageQueue.value.push(stage);
-          console.log('[QUEUE] New stage added:', stage);
         }
       }
 
-
-      // ✅ Stage displayer: every 8s, show one new stage
       if (!stageInterval) {
         stageInterval = setInterval(() => {
           if (stageQueue.value.length > 0) {
             const next = stageQueue.value.shift();
             displayedStage.value = next;
             shownStages.add(next);
-            console.log('[DISPLAY] Stage now showing:', next);
           }
         }, 8000);
       }
 
-      // ✅ Exit condition
       if (pollStatus.value === 'FINISHED' || pollStatus.value === 'FAILED') {
         clearInterval(pollInterval);
         clearInterval(stageInterval);
@@ -301,10 +410,8 @@ function pollStatusUpdates(id) {
         responseMessage.value = 'Execution complete.';
       }
 
-      // ✅ Post-processing logic (unchanged, keep this as-is)
       const traj = res.data.trajectory;
       if (!traj) {
-        console.warn('[WARN] No trajectory found in response.');
         return;
       }
 
@@ -312,7 +419,6 @@ function pollStatusUpdates(id) {
         ([k, v]) => k.startsWith('tool_name_') && v === 'create_adversary'
       );
       if (!advToolEntry) {
-        console.warn('[WARN] No create_adversary tool_name_X entry found.');
         return;
       }
 
@@ -323,12 +429,10 @@ function pollStatusUpdates(id) {
       try {
         if (typeof args === 'string') args = JSON.parse(args);
       } catch {
-        console.warn('[WARN] Failed to parse tool_args:', args);
         return;
       }
 
       if (!args || !Array.isArray(args.atomic_ordering)) {
-        console.warn('[WARN] Invalid atomic_ordering in tool_args:', args);
         return;
       }
 
@@ -336,10 +440,7 @@ function pollStatusUpdates(id) {
       try {
         const parsedObs = typeof observation === 'string' ? JSON.parse(observation) : observation;
         adversaryUUID = parsedObs?.adversary_id || null;
-        console.log('[DEBUG] Parsed adversary UUID from observation:', adversaryUUID);
-      } catch {
-        console.warn('[WARN] Failed to parse observation:', observation);
-      }
+      } catch {}
 
       parsedAdversaryLine.value = {
         name: args.name || 'Unnamed Adversary',
@@ -356,7 +457,6 @@ function pollStatusUpdates(id) {
           try {
             parsed = typeof v === 'string' ? JSON.parse(v) : v;
           } catch {
-            console.warn(`[WARN] Could not parse ${k}`);
             return;
           }
 
@@ -382,12 +482,11 @@ function pollStatusUpdates(id) {
       parsedAbilityLines.value = abilityUuids
         .map(uuid => {
           const name = uuidToName[uuid];
-          if (!name) console.warn(`[MISSING] No name for ability_id: ${uuid}`);
           return name;
         })
         .filter(Boolean);
 
-      // 🔍 Find operation creation entry
+      // Find operation creation entry
       const opToolEntry = Object.entries(traj).find(
         ([k, v]) => k.startsWith('tool_name_') && v === 'create_operation'
       );
@@ -399,7 +498,6 @@ function pollStatusUpdates(id) {
         try {
           if (typeof opArgs === 'string') opArgs = JSON.parse(opArgs);
         } catch {
-          console.warn('[WARN] Failed to parse operation tool_args:', opArgs);
           opArgs = null;
         }
 
@@ -408,13 +506,10 @@ function pollStatusUpdates(id) {
             name: opArgs.operation_name,
             adversaryName: opArgs.adversary_name || 'unknown'
           };
-          console.debug('[DEBUG] Parsed operation args name:', opArgs.operation_name);
         }
       }
 
-
     } catch (e) {
-      console.error('Polling error:', e);
       clearInterval(pollInterval);
       pollInterval = null;
       errorMessage.value = 'Polling failed.';
@@ -423,22 +518,21 @@ function pollStatusUpdates(id) {
 }
 
 function startStatusAnimation() {
-  if (dotInterval) return  // avoid multiple intervals
-
+  if (dotInterval) return
   dotInterval = setInterval(() => {
-    dotCount = (dotCount + 1) % 4  // 0 to 3
+    dotCount = (dotCount + 1) % 4
     animatedStatus.value = 'RUNNING' + '.'.repeat(dotCount)
-  }, 500)  // adjust speed as desired
+  }, 500)
 }
+
 function stopStatusAnimation() {
   if (dotInterval) {
     clearInterval(dotInterval)
     dotInterval = null
-    animatedStatus.value = pollStatus.value  // reset to actual status string
+    animatedStatus.value = pollStatus.value
   }
 }
 
-// Extract thoughts from the trajectory object
 const thoughts = computed(() => {
   const traj = pollTrajectory.value
   if (!traj) return []
@@ -482,6 +576,7 @@ const operationSentenceKeys = computed(() =>
     s.toLowerCase().includes('operation')
   )
 );
+
 function assignInjectLocations() {
   const used = new Set();
   const injects = {};
@@ -514,13 +609,11 @@ const lastAbilitySentenceKeys = computed(() => (resolvedInjects.value?.ability ?
 const lastAdversarySentenceKeys = computed(() => (resolvedInjects.value?.adversary ?? new Set()));
 const lastOperationSentenceKeys = computed(() => (resolvedInjects.value?.operation ?? new Set()));
 
-
-
 watch(responseMessage, (newVal, oldVal) => {
   if (newVal && newVal !== oldVal) {
      if (!hasShownInitialMessage) {
       hasShownInitialMessage = true;
-      return;  // show first message immediately
+      return;
     }
     setTimeout(() => {
       if (responseMessage.value === newVal) {
@@ -528,6 +621,81 @@ watch(responseMessage, (newVal, oldVal) => {
       }
     }, 2000)
   }
+})
+
+const selectedFile = ref(null)
+const isUploading = ref(false)
+const ragFiles = ref([])
+const uploadMessage = ref('')
+const uploadError = ref('')
+
+function onFileSelected(e) {
+  uploadMessage.value = ''
+  uploadError.value = ''
+  const file = e.target.files?.[0]
+  if (!file) {
+    selectedFile.value = null
+    return
+  }
+  const isJson = file.type === 'application/json' || file.name.toLowerCase().endsWith('.json')
+  if (!isJson) {
+    selectedFile.value = null
+    uploadError.value = 'Please select a .json file.'
+    return
+  }
+  selectedFile.value = file
+}
+
+async function uploadRag() {
+  if (!selectedFile.value) return
+  isUploading.value = true
+  uploadMessage.value = ''
+  uploadError.value = ''
+  try {
+    const fd = new FormData()
+    fd.append('file', selectedFile.value)
+    const res = await $api.post('/plugin/mcp/rag/upload', fd)
+    uploadMessage.value = `Uploaded ${res.data.filename} (${formatBytes(res.data.size)})`
+    selectedFile.value = null
+    await fetchRagFiles()
+  } catch (err) {
+    uploadError.value = err?.response?.data?.error || 'Upload failed.'
+  } finally {
+    isUploading.value = false
+  }
+}
+
+async function fetchRagFiles() {
+  try {
+    const res = await $api.get('/plugin/mcp/rag/list')
+    ragFiles.value = res.data.files || []
+    const available = new Set(ragFiles.value.map(f => f.filename))
+    selectedRag.value = selectedRag.value.filter(name => available.has(name))
+  } catch (err) {
+    uploadError.value = err?.response?.data?.error || 'Failed to fetch RAG files.'
+  }
+}
+
+function formatBytes(bytes) {
+  if (bytes === 0 || bytes == null) return '0 B'
+  const k = 1024
+  const sizes = ['B', 'KB', 'MB', 'GB', 'TB']
+  const i = Math.floor(Math.log(bytes) / Math.log(k))
+  return `${(bytes / Math.pow(k, i)).toFixed(1)} ${sizes[i]}`
+}
+
+function formatDate(iso) {
+  if (!iso) return ''
+  try {
+    const d = new Date(iso)
+    return d.toLocaleString()
+  } catch {
+    return iso
+  }
+}
+
+onMounted(() => {
+  fetchRagFiles()
 })
 </script>
 <style scoped>
@@ -556,5 +724,29 @@ watch(responseMessage, (newVal, oldVal) => {
   margin-left: 1.5rem;  /* indent */
   margin-bottom: 0.5rem;  /* vertical spacing between bullets */
   line-height: 1.4;  /* slightly more legible */
+}
+
+/* Reasoning panel to match palette */
+.reasoning-panel {
+  border-left: 4px solid #7a00cc;
+  background-color: #f4f4f4;
+  color: #222;
+  padding: 1rem;
+  border-radius: 6px;
+}
+.reasoning-title {
+  color: #363636;
+}
+.reasoning-pre {
+  white-space: pre-wrap;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  background-color: #ffffff;
+  color: #222;
+  padding: 0.75rem;
+  border-radius: 4px;
+  margin-top: 0.5rem;
+  max-height: 260px;
+  overflow: auto;
+  border: 1px solid #e6e6e6;
 }
 </style>
