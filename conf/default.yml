@@ -1,0 +1,10 @@
+---
+llm:
+  model: gpt-4o
+  api_key: 
+  offline: true
+  use_mock: false
+factory:
+  model: gpt-4o
+  api_key: 
+  temperature: 0.4
