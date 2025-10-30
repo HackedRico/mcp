@@ -13,7 +13,6 @@ def configure_dspy_from_env():
         lm = dspy.LM(model=model, api_key=api_key, temperature=temperature, max_tokens=max_tokens)
         dspy.configure(lm=lm)
 
-# Configure on import if environment variables are present
 configure_dspy_from_env()
 
 class RankApproaches(dspy.Signature):
