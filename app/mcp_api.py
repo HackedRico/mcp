@@ -1,10 +1,18 @@
 from aiohttp import web
+from aiohttp_apispec import docs, request_schema, response_schema
 import logging
 import mlflow
 import os
 import json
 from pathlib import Path
 from datetime import datetime
+
+# Import API schemas
+from plugins.mcp.app.api.v2.schemas.base_schemas import *
+from plugins.mcp.app.api.v2.schemas.execute_schemas import *
+from plugins.mcp.app.api.v2.schemas.status_schemas import *
+from plugins.mcp.app.api.v2.schemas.rag_schemas import *
+from plugins.mcp.app.api.v2.schemas.runs_schemas import *
 
 class McpAPI:
 
@@ -14,6 +22,15 @@ class McpAPI:
         self.log = logging.getLogger("plugins.mcp")
         self.log.info("[MCP] Initialized McpAPI")
 
+    @docs(
+        tags=["MCP / Execution"],
+        summary="Execute AI agent task",
+        description="Execute a task using the MCP AI agent. Supports factory (ability generation), planner, and server execution modes.",
+    )
+    @request_schema(ExecuteRequestSchema)
+    @response_schema(ExecuteResponseSchema, 200)
+    @response_schema(ErrorResponseSchema, 400)
+    @response_schema(ErrorResponseSchema, 500)
     async def execute(self, request):
         self.log.info("[MCP] Executing request")
         try:
@@ -37,6 +54,14 @@ class McpAPI:
             self.log.error(f"[MCP] Error executing request: {str(e)}")
             return web.json_response({"error": str(e)}, status=500)
 
+    @docs(
+        tags=["MCP / Status"],
+        summary="Get execution status",
+        description="Retrieve the current status and trajectory of a running or completed MCP execution by run ID.",
+    )
+    @response_schema(StatusResponseSchema, 200)
+    @response_schema(ErrorResponseSchema, 400)
+    @response_schema(ErrorResponseSchema, 500)
     async def status(self, request):
         run_id = request.query.get("run_id")
         if not run_id:
@@ -68,6 +93,14 @@ class McpAPI:
             self.log.error(f"[MCP] Error fetching run {run_id}: {e}")
             return web.json_response({"error": str(e)}, status=500)
 
+    @docs(
+        tags=["MCP / RAG"],
+        summary="Upload RAG knowledge file",
+        description="Upload a JSON file containing context/knowledge for Retrieval-Augmented Generation. Multipart form-data with 'file' field.",
+    )
+    @response_schema(UploadRagResponseSchema, 200)
+    @response_schema(ErrorResponseSchema, 400)
+    @response_schema(ErrorResponseSchema, 500)
     async def upload_rag(self, request):
         try:
             reader = await request.multipart()
@@ -113,6 +146,13 @@ class McpAPI:
             self.log.error(f"[MCP] Error uploading RAG file: {e}")
             return web.json_response({"error": str(e)}, status=500)
 
+    @docs(
+        tags=["MCP / RAG"],
+        summary="List RAG knowledge files",
+        description="Retrieve a list of all uploaded RAG knowledge files with metadata.",
+    )
+    @response_schema(ListRagResponseSchema, 200)
+    @response_schema(ErrorResponseSchema, 500)
     async def list_rag(self, request):
         try:
             base_dir = (Path(__file__).resolve().parent.parent / "data")
@@ -133,6 +173,13 @@ class McpAPI:
             self.log.error(f"[MCP] Error listing RAG files: {e}")
             return web.json_response({"error": str(e)}, status=500)
 
+    @docs(
+        tags=["MCP / Runs"],
+        summary="List all runs",
+        description="List all MLflow runs with pagination support. Returns basic information about each run.",
+    )
+    @response_schema(ListRunsResponseSchema, 200)
+    @response_schema(ErrorResponseSchema, 500)
     async def list_runs(self, request):
         """List all MLflow runs with basic information."""
         try:
@@ -189,6 +236,14 @@ class McpAPI:
             self.log.error(f"[MCP] Error listing runs: {e}")
             return web.json_response({"error": str(e)}, status=500)
 
+    @docs(
+        tags=["MCP / Runs"],
+        summary="Get run details",
+        description="Get detailed information for a specific run including full execution trajectory, parameters, and tags.",
+    )
+    @response_schema(GetRunDetailResponseSchema, 200)
+    @response_schema(ErrorResponseSchema, 400)
+    @response_schema(ErrorResponseSchema, 500)
     async def get_run_detail(self, request):
         """Get detailed information for a specific run including full trajectory."""
         run_id = request.query.get("run_id")
