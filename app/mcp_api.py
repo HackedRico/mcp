@@ -23,9 +23,9 @@ class McpAPI:
         self.log.info("[MCP] Initialized McpAPI")
 
     @docs(
-        tags=["MCP / Execution"],
-        summary="Execute AI agent task",
-        description="Execute a task using the MCP AI agent. Supports factory (ability generation), planner, and server execution modes.",
+        tags=["MCP / Ability Factory"],
+        summary="Execute ability generation or operation planning",
+        description="Generate Caldera abilities or plan operations using LLM. Supports 'factory' (ability generation), 'planner' (operation planning), and RAG-enhanced modes.",
     )
     @request_schema(ExecuteRequestSchema)
     @response_schema(ExecuteResponseSchema, 200)
@@ -55,9 +55,9 @@ class McpAPI:
             return web.json_response({"error": str(e)}, status=500)
 
     @docs(
-        tags=["MCP / Status"],
+        tags=["MCP / Execution Status"],
         summary="Get execution status",
-        description="Retrieve the current status and trajectory of a running or completed MCP execution by run ID.",
+        description="Retrieve the current status, reasoning trajectory, and results of a running or completed execution by run ID.",
     )
     @response_schema(StatusResponseSchema, 200)
     @response_schema(ErrorResponseSchema, 400)
@@ -94,9 +94,9 @@ class McpAPI:
             return web.json_response({"error": str(e)}, status=500)
 
     @docs(
-        tags=["MCP / RAG"],
-        summary="Upload RAG knowledge file",
-        description="Upload a JSON file containing context/knowledge for Retrieval-Augmented Generation. Multipart form-data with 'file' field.",
+        tags=["MCP / CTI Knowledge Base"],
+        summary="Upload threat intelligence file",
+        description="Upload a STIX JSON file containing Cyber Threat Intelligence for RAG-enhanced ability generation. Multipart form-data with 'file' field.",
     )
     @response_schema(UploadRagResponseSchema, 200)
     @response_schema(ErrorResponseSchema, 400)
@@ -147,9 +147,9 @@ class McpAPI:
             return web.json_response({"error": str(e)}, status=500)
 
     @docs(
-        tags=["MCP / RAG"],
-        summary="List RAG knowledge files",
-        description="Retrieve a list of all uploaded RAG knowledge files with metadata.",
+        tags=["MCP / CTI Knowledge Base"],
+        summary="List threat intelligence files",
+        description="Retrieve a list of all uploaded STIX CTI files with metadata (filename, size, last modified).",
     )
     @response_schema(ListRagResponseSchema, 200)
     @response_schema(ErrorResponseSchema, 500)
@@ -174,9 +174,9 @@ class McpAPI:
             return web.json_response({"error": str(e)}, status=500)
 
     @docs(
-        tags=["MCP / Runs"],
-        summary="List all runs",
-        description="List all MLflow runs with pagination support. Returns basic information about each run.",
+        tags=["MCP / Run History"],
+        summary="List execution history",
+        description="Browse all historical ability factory and operation planner executions with pagination. Returns run metadata, prompts, and results.",
     )
     @response_schema(ListRunsResponseSchema, 200)
     @response_schema(ErrorResponseSchema, 500)
@@ -237,9 +237,9 @@ class McpAPI:
             return web.json_response({"error": str(e)}, status=500)
 
     @docs(
-        tags=["MCP / Runs"],
-        summary="Get run details",
-        description="Get detailed information for a specific run including full execution trajectory, parameters, and tags.",
+        tags=["MCP / Run History"],
+        summary="Get detailed run information",
+        description="Get comprehensive details for a specific execution including full LLM reasoning trajectory, tool calls, parameters, and results.",
     )
     @response_schema(GetRunDetailResponseSchema, 200)
     @response_schema(ErrorResponseSchema, 400)
