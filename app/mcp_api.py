@@ -8,11 +8,16 @@ from pathlib import Path
 from datetime import datetime
 
 # Import API schemas
-from plugins.mcp.app.api.v2.schemas.base_schemas import *
-from plugins.mcp.app.api.v2.schemas.execute_schemas import *
-from plugins.mcp.app.api.v2.schemas.status_schemas import *
-from plugins.mcp.app.api.v2.schemas.rag_schemas import *
-from plugins.mcp.app.api.v2.schemas.runs_schemas import *
+from plugins.mcp.app.api.v2.schemas.base_schemas import ErrorResponseSchema
+from plugins.mcp.app.api.v2.schemas.execute_schemas import ExecuteRequestSchema, ExecuteResponseSchema
+from plugins.mcp.app.api.v2.schemas.status_schemas import StatusRequestSchema, StatusResponseSchema
+from plugins.mcp.app.api.v2.schemas.rag_schemas import UploadRagResponseSchema, ListRagResponseSchema
+from plugins.mcp.app.api.v2.schemas.runs_schemas import (
+    ListRunsRequestSchema,
+    ListRunsResponseSchema,
+    GetRunDetailRequestSchema,
+    GetRunDetailResponseSchema
+)
 
 class McpAPI:
 
