@@ -86,7 +86,8 @@ class GetRunDetailRequestSchema(Schema):
 
     run_id = fields.Str(
         required=True,
-        description="MLflow run ID to retrieve details for"
+        description="MLflow run ID to retrieve details for",
+        metadata={"location": "query"},
     )
 
 
