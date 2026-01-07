@@ -59,6 +59,7 @@ class McpAPI:
         summary="Get execution status",
         description="Retrieve the current status, reasoning trajectory, and results of a running or completed execution by run ID.",
     )
+    @request_schema(StatusRequestSchema)
     @response_schema(StatusResponseSchema, 200)
     @response_schema(ErrorResponseSchema, 400)
     @response_schema(ErrorResponseSchema, 500)
