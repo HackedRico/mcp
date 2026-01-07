@@ -11,11 +11,13 @@ class ListRunsRequestSchema(Schema):
 
     limit = fields.Int(
         description="Maximum number of runs to return",
-        default=100
+        default=100,
+        metadata={"location": "query"},
     )
     offset = fields.Int(
         description="Offset for pagination",
-        default=0
+        default=0,
+        metadata={"location": "query"},
     )
 
 
