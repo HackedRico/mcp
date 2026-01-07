@@ -11,7 +11,8 @@ class StatusRequestSchema(Schema):
 
     run_id = fields.Str(
         required=True,
-        description="MLflow run ID to check status for"
+        description="MLflow run ID to check status for",
+        metadata={"location": "query"},
     )
 
 
