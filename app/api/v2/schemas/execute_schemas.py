@@ -14,7 +14,8 @@ class ExecuteRequestSchema(Schema):
         required=True,
         description="The prompt/task to execute"
     )
-    type = fields.Str(
+    execution_type = fields.Str(
+        data_key="type",
         description="Execution focus type: 'factory', 'planner', or 'server'",
         default="factory"
     )
