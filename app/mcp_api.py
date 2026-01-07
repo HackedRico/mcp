@@ -243,6 +243,7 @@ class McpAPI:
         summary="Get detailed run information",
         description="Get comprehensive details for a specific execution including full LLM reasoning trajectory, tool calls, parameters, and results.",
     )
+    @request_schema(GetRunDetailRequestSchema)
     @response_schema(GetRunDetailResponseSchema, 200)
     @response_schema(ErrorResponseSchema, 400)
     @response_schema(ErrorResponseSchema, 500)
