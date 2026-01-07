@@ -18,7 +18,7 @@ class ModelConfigSchema(Schema):
     model = fields.Str(description="Model name/identifier (e.g., 'gpt-4', 'claude-3-5-sonnet')")
     temperature = fields.Float(description="Sampling temperature (0.0-1.0)")
     max_tokens = fields.Int(description="Maximum tokens to generate")
-    api_key = fields.Str(description="API key for the model provider")
+    api_key = fields.Str(description="API key for model provider. Recommended: configure server-side via DSPY_API_KEY environment variable")
     api_base = fields.Str(description="Base URL for API endpoint")
     timeout = fields.Int(description="Request timeout in seconds")
 
