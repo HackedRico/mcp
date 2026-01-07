@@ -178,6 +178,7 @@ class McpAPI:
         summary="List execution history",
         description="Browse all historical ability factory and operation planner executions with pagination. Returns run metadata, prompts, and results.",
     )
+    @request_schema(ListRunsRequestSchema)
     @response_schema(ListRunsResponseSchema, 200)
     @response_schema(ErrorResponseSchema, 500)
     async def list_runs(self, request):
