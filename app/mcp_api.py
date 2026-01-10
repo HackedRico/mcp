@@ -1,5 +1,5 @@
 from aiohttp import web
-from aiohttp_apispec import docs, request_schema, response_schema
+from aiohttp_apispec import docs, request_schema, response_schema, querystring_schema
 import logging
 import mlflow
 import os
@@ -64,7 +64,7 @@ class McpAPI:
         summary="Get execution status",
         description="Retrieve the current status, reasoning trajectory, and results of a running or completed execution by run ID.",
     )
-    @request_schema(StatusRequestSchema)
+    @querystring_schema(StatusRequestSchema)
     @response_schema(StatusResponseSchema, 200)
     @response_schema(ErrorResponseSchema, 400)
     @response_schema(ErrorResponseSchema, 500)
@@ -184,7 +184,7 @@ class McpAPI:
         summary="List execution history",
         description="Browse all historical ability factory and operation planner executions with pagination. Returns run metadata, prompts, and results.",
     )
-    @request_schema(ListRunsRequestSchema)
+    @querystring_schema(ListRunsRequestSchema)
     @response_schema(ListRunsResponseSchema, 200)
     @response_schema(ErrorResponseSchema, 500)
     async def list_runs(self, request):
@@ -248,7 +248,7 @@ class McpAPI:
         summary="Get detailed run information",
         description="Get comprehensive details for a specific execution including full LLM reasoning trajectory, tool calls, parameters, and results.",
     )
-    @request_schema(GetRunDetailRequestSchema)
+    @querystring_schema(GetRunDetailRequestSchema)
     @response_schema(GetRunDetailResponseSchema, 200)
     @response_schema(ErrorResponseSchema, 400)
     @response_schema(ErrorResponseSchema, 500)
