@@ -1,93 +1,283 @@
-# range_mcp
+# Caldera MCP Plugin
 
+An AI-powered plugin for Caldera that orchestrates long-running LLM workflows to automatically create adversary emulation abilities and plan operations. Optionally enriches workflows with Retrieval-Augmented Generation (RAG) using Cyber Threat Intelligence (CTI) from STIX JSON files. All executions are tracked via MLflow for full observability into LLM reasoning and tool usage.
 
+## Features
 
-## Getting started
+- **LLM Ability Factory**: Generate custom Caldera abilities from natural language descriptions
+- **LLM Operation Planner**: Create and execute complete adversary emulation operations
+- **CTI Integration**: Enhance abilities with real-world threat intelligence from STIX bundles
+- **MLflow Tracking**: Full observability of LLM reasoning, tool calls, and execution trajectory
+- **Flexible Model Support**: Works with most LLM providers (OpenAI, Anthropic, etc.)
+- **Run History**: Browse and search all historical executions with full details
 
-To make it easy for you to get started with GitLab, here's a list of recommended next steps.
+## Quick Start
 
-Already a pro? Just edit this README.md and make it your own. Want to make it easy? [Use the template at the bottom](#editing-this-readme)!
+### 1. Start Caldera
 
-## Add your files
+From the Caldera root directory:
 
-* [Create](https://docs.gitlab.com/user/project/repository/web_editor/#create-a-file) or [upload](https://docs.gitlab.com/user/project/repository/web_editor/#upload-a-file) files
-* [Add files using the command line](https://docs.gitlab.com/topics/git/add_files/#add-files-to-a-git-repository) or push an existing Git repository with the following command:
+```bash
+python3 server.py --insecure
+```
+
+The MCP plugin automatically starts MLflow on port 5000 during Caldera initialization.
+
+### 2. Access the MCP Interface
+
+Navigate to the Caldera web interface and select the **MCP** plugin from the sidebar.
+
+### 3. Configure Your LLM
+
+In the Global Model Configuration panel:
+- Enter your **API key** (required)
+- Select your **model** (default: gpt-4o)
+- Adjust **temperature** and **max_tokens** as needed
+- Set **max tool calls** for ReAct iterations (default: 5)
+
+### 4. Choose Your Workflow
+
+**LLM Ability Factory**: Create specific abilities
+- Example: "Create a Windows ability that dumps credentials using PowerShell"
+
+**LLM Operation Planner**: Plan and execute operations
+- Example: "Execute a ransomware simulation on Windows agents"
+
+### 5. Run Your Task
+
+1. Enter your prompt in natural language
+2. (Optional) Select STIX CTI files to enhance with threat intelligence
+3. Click **Execute**
+4. Watch real-time progress via MLflow stages and reasoning
+5. View results and created abilities/operations
+
+## Architecture
+
+### Core Components
+
+**Frontend (Vue.js)**
+- `mcp.vue`: Main landing page with navigation
+- `local_mcp_ability_factory.vue`: Ability creation interface
+- `public_mcp_ability_factory.vue`: Public ability interface
+- `mcp_history.vue`: Historical run browser
+- `mcp_extension_guide.vue`: Developer extension guide
+
+**Backend (Python)**
+- `mcp_api.py`: aiohttp API routes
+- `mcp_svc.py`: Service orchestration layer
+- `mcp_factory_client.py`: Ability factory DSPy client
+- `mcp_planner_client.py`: Operation planner DSPy client
+- `mcp_server.py`: MCP tool server exposing Caldera API
+- `factory.py`: Command generation DSPy module
+- `rag.py`: STIX CTI retrieval service
+
+**Integration**
+- `hook.py`: Plugin initialization and MLflow startup
+
+## Configuration
+
+### Default Settings
+
+Edit `conf/default.yml` to set default LLM configuration:
+
+```yaml
+llm:
+  model: gpt-4o
+  api_key: YOUR_API_KEY
+  offline: true
+  use_mock: false
+factory:
+  model: gpt-4o
+  api_key: YOUR_API_KEY
+  temperature: 0.4
+```
+
+**Note**: Frontend model configuration overrides these defaults per run.
+
+### RAG Configuration
+
+When using CTI enhancement:
+- **Embedding Model**: Default `openai/text-embedding-3-small`
+- **Top-K Retrieval**: Default 5 objects (configurable via UI)
+- **STIX File Location**: Upload files via UI, stored in `data/` directory
+
+## Using CTI Integration
+
+### Upload STIX Files
+
+1. Navigate to **MCP → Ability Factory** or **Planner**
+2. In the RAG Configuration section, click **Upload STIX File**
+3. Select your STIX JSON bundle(s)
+4. Files are stored in `plugins/mcp/data/`
+
+### Enable CTI for a Run
+
+1. In the RAG Configuration panel, select which STIX files to use
+2. (Optional) Adjust embedding model and top-K retrieval
+3. Execute your task normally
+
+The LLM will receive relevant CTI context based on your prompt, including:
+- Attack patterns and techniques
+- Malware and tool descriptions
+- Threat actor TTPs
+- Campaign information
+
+### CTI Data Flow
 
 ```
-cd existing_repo
-git remote add origin https://gitlab.mitre.org/caldera/range_mcp.git
-git branch -M main
-git push -uf origin main
+User Prompt → RAG Search (Semantic) → Top-K CTI Objects Retrieved
+                                    ↓
+                        Detailed Context for Top 3 Objects
+                                    ↓
+                        Formatted CTI Context String
+                                    ↓
+                        LLM Receives Task + CTI Context
+                                    ↓
+                        Creates CTI-Informed Abilities/Operations
 ```
 
-## Integrate with your tools
+## MLflow Tracking
 
-* [Set up project integrations](https://gitlab.mitre.org/caldera/range_mcp/-/settings/integrations)
+### Access MLflow UI
 
-## Collaborate with your team
+Open your browser to: **http://localhost:5000**
 
-* [Invite team members and collaborators](https://docs.gitlab.com/user/project/members/)
-* [Create a new merge request](https://docs.gitlab.com/user/project/merge_requests/creating_merge_requests/)
-* [Automatically close issues from merge requests](https://docs.gitlab.com/user/project/issues/managing_issues/#closing-issues-automatically)
-* [Enable merge request approvals](https://docs.gitlab.com/user/project/merge_requests/approvals/)
-* [Set auto-merge](https://docs.gitlab.com/user/project/merge_requests/auto_merge/)
+Navigate to **Experiments → Traces** to view:
+- Run status and stages
+- LLM chain of thought (`thought_0`, `thought_1`, etc.)
+- Tool calls and arguments (`tool_name_N`, `tool_args_N`)
+- RAG retrieval steps (when CTI is used)
+- Final results and reasoning
 
-## Test and Deploy
+### Understanding Run Tags
 
-Use the built-in continuous integration in GitLab.
+**Status Tags**:
+- `status`: running, complete, failed
+- `stage`: Current execution phase
+- `reasoning`: LLM's final reasoning summary
+- `process_result`: Summary of what was created
 
-* [Get started with GitLab CI/CD](https://docs.gitlab.com/ci/quick_start/)
-* [Analyze your code for known vulnerabilities with Static Application Security Testing (SAST)](https://docs.gitlab.com/user/application_security/sast/)
-* [Deploy to Kubernetes, Amazon EC2, or Amazon ECS using Auto Deploy](https://docs.gitlab.com/topics/autodevops/requirements/)
-* [Use pull-based deployments for improved Kubernetes management](https://docs.gitlab.com/user/clusters/agent/)
-* [Set up protected environments](https://docs.gitlab.com/ci/environments/protected_environments/)
+**RAG Tags** (when CTI is enabled):
+- `rag_retrieval_step_N`: RAG retrieval process
+- `rag_retrieved_object_N`: Names of CTI objects retrieved
+- `cti_context_preview`: First 1000 chars of CTI sent to LLM
+- `cti_context_length`: Total CTI context size
 
-***
+**LLM Trajectory**:
+- `thought_N`: LLM reasoning at each step
+- `observation_N`: Tool execution results
+- `tool_name_N`: Tool that was called
+- `tool_args_N`: Arguments passed to tool
 
-# Editing this README
+## Extending the Framework
 
-When you're ready to make this README your own, just edit this file and use the handy template below (or feel free to structure it however you want - this is just a starting point!). Thanks to [makeareadme.com](https://www.makeareadme.com/) for this template.
+See the **Extend & Customize** guide in the UI for detailed instructions on:
+- Creating custom DSPy clients
+- Adding new MCP tools
+- Building custom workflows
+- Integrating with the service layer
 
-## Suggestions for a good README
+Example use cases:
+- Threat Hunter: Analyze adversary profiles and generate detection rules
+- Operation Optimizer: Review completed operations and suggest improvements
+- Campaign Builder: Create multi-stage campaigns from threat actor profiles
 
-Every project is different, so consider which of these sections apply to yours. The sections used in the template are suggestions for most open source projects. Also keep in mind that while a README can be too long and detailed, too long is better than too short. If you think your README is too long, consider utilizing another form of documentation rather than cutting out information.
+## Development
 
-## Name
-Choose a self-explaining name for your project.
+### Testing Individual Components
 
-## Description
-Let people know what your project can do specifically. Provide context and add a link to any reference visitors might be unfamiliar with. A list of Features or a Background subsection can also be added here. If there are alternatives to your project, this is a good place to list differentiating factors.
+```bash
+# Test factory client (requires running Caldera)
+cd app
+python mcp_factory_client.py
 
-## Badges
-On some READMEs, you may see small images that convey metadata, such as whether or not all the tests are passing for the project. You can use Shields to add some to your README. Many services also have instructions for adding a badge.
+# Test planner client
+python mcp_planner_client.py
 
-## Visuals
-Depending on what you are making, it can be a good idea to include screenshots or even a video (you'll frequently see GIFs rather than actual videos). Tools like ttygif can help, but check out Asciinema for a more sophisticated method.
+# Test MCP server tools
+python mcp_server.py
+```
 
-## Installation
-Within a particular ecosystem, there may be a common way of installing things, such as using Yarn, NuGet, or Homebrew. However, consider the possibility that whoever is reading your README is a novice and would like more guidance. Listing specific steps helps remove ambiguity and gets people to using your project as quickly as possible. If it only runs in a specific context like a particular programming language version or operating system or has dependencies that have to be installed manually, also add a Requirements subsection.
+### Project Structure
 
-## Usage
-Use examples liberally, and show the expected output if you can. It's helpful to have inline the smallest example of usage that you can demonstrate, while providing links to more sophisticated examples if they are too long to reasonably include in the README.
+```
+plugins/mcp/
+├── app/                    # Python backend
+│   ├── mcp_api.py         # API routes
+│   ├── mcp_svc.py         # Service layer
+│   ├── mcp_factory_client.py
+│   ├── mcp_planner_client.py
+│   ├── mcp_server.py      # MCP tool server
+│   ├── factory.py         # Command generation
+│   └── rag.py             # CTI retrieval
+├── gui/views/             # Vue frontend
+│   ├── mcp.vue
+│   ├── local_mcp_ability_factory.vue
+│   ├── public_mcp_ability_factory.vue
+│   ├── mcp_history.vue
+│   └── mcp_extension_guide.vue
+├── conf/default.yml       # Default configuration
+├── data/                  # STIX JSON files
+├── hook.py                # Plugin initialization
+└── README.md
+```
+
+## Dependencies
+
+- **dspy**: LLM orchestration framework with ReAct pattern
+- **mcp**: Model Context Protocol SDK for tool servers
+- **mlflow**: Experiment tracking and tracing
+- **aiohttp**: Async web framework
+- **psutil**: Process management for MLflow server
+- **requests**: HTTP client for Caldera API
+
+## Troubleshooting
+
+### API Key Errors
+
+**Error**: "API key is required but not provided"
+
+**Solution**: Enter your API key in the Global Model Configuration panel before executing.
+
+### MLflow Not Starting
+
+**Error**: Cannot access http://localhost:5000
+
+**Solution**: Check Caldera logs for MLflow startup messages. The plugin automatically kills processes on port 5000 and starts MLflow during initialization.
+
+### RAG Retrieval Failures
+
+**Error**: "RAG service not initialized" or embedding errors
+
+**Solution**:
+- Verify STIX files are valid JSON
+- Ensure API key has access to embedding models
+- Check MLflow logs for detailed error messages
+
+### Tool Execution Failures
+
+**Error**: Tools fail to initialize or execute
+
+**Solution**:
+- Verify Caldera API is accessible at `http://localhost:8888/api/v2/`
+- Check MCP server subprocess logs for environment issues
+- Ensure PYTHONPATH includes venv packages
+
+### Viewing Detailed Logs
+
+Check MLflow UI for:
+1. Full trajectory of tool calls
+2. Error messages in `error` param
+3. Traceback in `traceback` param
+4. Stage where failure occurred
 
 ## Support
-Tell people where they can go to for help. It can be any combination of an issue tracker, a chat room, an email address, etc.
 
-## Roadmap
-If you have ideas for releases in the future, it is a good idea to list them in the README.
-
-## Contributing
-State if you are open to contributions and what your requirements are for accepting them.
-
-For people who want to make changes to your project, it's helpful to have some documentation on how to get started. Perhaps there is a script that they should run or some environment variables that they need to set. Make these steps explicit. These instructions could also be useful to your future self.
-
-You can also document commands to lint the code or run tests. These steps help to ensure high code quality and reduce the likelihood that the changes inadvertently break something. Having instructions for running tests is especially helpful if it requires external setup, such as starting a Selenium server for testing in a browser.
-
-## Authors and acknowledgment
-Show your appreciation to those who have contributed to the project.
+For bugs and feature requests:
+- Check MLflow traces for detailed execution information
+- Review Caldera logs with `[MCP]` prefix
+- Consult the in-app Extension Guide for development questions
 
 ## License
-For open source projects, say how it is licensed.
 
-## Project status
-If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
+Part of the Caldera project. See main Caldera repository for license information.
