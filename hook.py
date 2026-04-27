@@ -89,22 +89,31 @@ try:
     from plugins.mcp.app.mcp_svc import MCPService
     from plugins.mcp.app.mcp_gui import McpGUI
     from plugins.mcp.app.mcp_api import McpAPI
+    from plugins.mcp.app.server_registry import discover_mcp_servers
     logging.getLogger("litellm_logging").setLevel(logging.ERROR)
 
 except ImportError as e:
     log.error(f"[MCP] Error importing MCP plugin modules: {e}")
     traceback.print_exc()
 
-# ✅ Enable function stays the same
 async def enable(services):
     app = services.get('app_svc').application
 
-    services.get('data_svc').add_service('mcp_svc', MCPService(services))
+    # Discover MCP servers provided by sibling plugins (plus the core one shipped with mcp)
+    import pathlib
+    plugins_root = pathlib.Path(__file__).resolve().parent.parent
+    server_registry = discover_mcp_servers(plugins_root)
+    log.info(f"[MCP] Server registry: {list(server_registry.keys())}")
+
+    services.get('data_svc').add_service(
+        'mcp_svc', MCPService(services, server_registry=server_registry)
+    )
     mcp_gui = McpGUI(services, name=name, description=description)
     app.router.add_static('/mcp', 'plugins/mcp/static/', append_version=True)
-    
+
     mcp_api = McpAPI(services)
     app.router.add_route('POST', '/plugin/mcp/execute', mcp_api.execute)
     app.router.add_route('GET', '/plugin/mcp/status', mcp_api.status)
     app.router.add_route('POST', "/plugin/mcp/rag/upload", mcp_api.upload_rag)
     app.router.add_route('GET', "/plugin/mcp/rag/list", mcp_api.list_rag)
+    app.router.add_route('GET', '/plugin/mcp/servers', mcp_api.list_servers)
