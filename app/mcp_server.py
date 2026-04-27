@@ -1,3 +1,4 @@
+import os
 from mcp.server.fastmcp import FastMCP
 from pydantic import BaseModel
 import requests
@@ -7,7 +8,14 @@ import collections
 import uuid
 
 from factory import CreateCommand
-mcp = FastMCP("Caldera API MCP Server")
+
+MCP_METADATA = {
+    "display_name": "CALDERA Core",
+    "default_enabled": True,
+    "description": "Wraps Caldera's core v2 REST API (abilities, adversaries, agents, operations, payloads)",
+}
+
+mcp = FastMCP("Caldera Core MCP Server")
 
 class CalderaRequest:
     def __init__(self, url, api_key):
@@ -45,12 +53,12 @@ class CalderaRequest:
 
 
 caldera_request = CalderaRequest(
-    url="http://localhost:8888/api/v2/",
-    api_key="ADMIN123",
+    url=os.environ.get("CALDERA_URL", "http://localhost:8888/api/v2/"),
+    api_key=os.environ.get("CALDERA_API_KEY", "ADMIN123"),
 )
 
 
-@mcp.tool()
+@mcp.tool(name="core_health_check")
 def health_check():
     """
     Returns the health of the Caldera API.
@@ -88,7 +96,7 @@ def filter_abilities(req, tactic: str, atomic: bool):
     return stockpile_abilities or []
 
 
-@mcp.tool()
+@mcp.tool(name="core_get_abilities_by_tactic")
 def get_abilities_by_tactic(tactic: str):
     """
     Returns the stockpile abilities of Caldera specified by the tactic.
@@ -115,7 +123,7 @@ def get_abilities_by_tactic(tactic: str):
             return stockpile_abilities[:5]
 
 
-@mcp.tool()
+@mcp.tool(name="core_get_ability_by_id")
 def get_ability_by_id(id: str):
     """
     Returns the ability of the Caldera API specified by the id.
@@ -123,7 +131,7 @@ def get_ability_by_id(id: str):
     return caldera_request.make_get_request(f"abilities/{id}")
 
 
-@mcp.tool()
+@mcp.tool(name="core_get_adversaries")
 def get_adversaries():
     """
     Returns all Caldera adversaries.
@@ -139,7 +147,7 @@ def get_adversaries():
     return adversary_list
 
 
-@mcp.tool()
+@mcp.tool(name="core_get_adversary_by_ability_id")
 def get_adversary_by_ability_id(ability_id: str, ability_name: str = None):
     """
     Filters all Caldera adversaries by the specifies ability id or ability name.
@@ -180,7 +188,7 @@ def get_adversary_by_ability_id(ability_id: str, ability_name: str = None):
     return adversary_list
 
 
-@mcp.tool()
+@mcp.tool(name="core_get_adversary_by_name")
 def get_adversary_by_name(name: str):
     """
     Returns the Caldera adversary specified by the name.
@@ -193,7 +201,7 @@ def get_adversary_by_name(name: str):
     return found_adversaries
 
 
-@mcp.tool()
+@mcp.tool(name="core_get_adversary_by_id")
 def get_adversary_by_id(id: str):
     """
     Returns the Caldera adversary specified by the id.
@@ -206,7 +214,7 @@ def get_adversary_by_id(id: str):
     return adversary_stripped
 
 
-@mcp.tool()
+@mcp.tool(name="core_get_all_agents")
 def get_all_agents():
     """
     Returns all active and dead agents.
@@ -215,7 +223,7 @@ def get_all_agents():
     return caldera_request.make_get_request("agents")
 
 
-@mcp.tool()
+@mcp.tool(name="core_get_agent_by_paw")
 def get_agent_by_paw(paw: str):
     """
     Returns the agent of the Caldera API specified by the paw.
@@ -224,7 +232,7 @@ def get_agent_by_paw(paw: str):
     return caldera_request.make_get_request(f"agents/{paw}")
 
 
-@mcp.tool()
+@mcp.tool(name="core_get_all_operations")
 def get_all_operations():
     """
     Returns all active and dead operations.
@@ -233,7 +241,7 @@ def get_all_operations():
     return caldera_request.make_get_request("operations")
 
 
-@mcp.tool()
+@mcp.tool(name="core_get_operation_by_id")
 def get_operation_by_id(id: str):
     """
     Return operation by specified id.
@@ -242,7 +250,7 @@ def get_operation_by_id(id: str):
     return caldera_request.make_get_request(f"operations/{id}")
 
 
-@mcp.tool()
+@mcp.tool(name="core_get_operation_links")
 def get_operation_links(operation_id: str):
     """
     Specify an operation id to get the links of the operation.
@@ -251,7 +259,7 @@ def get_operation_links(operation_id: str):
     return caldera_request.make_get_request(f"operations/{operation_id}/links")
 
 
-@mcp.tool()
+@mcp.tool(name="core_get_operation_link")
 def get_operation_link(operation_id: str, link_id: str):
     """
     Specify an operation id and link id to get the specific link of the specific operation.
@@ -262,7 +270,7 @@ def get_operation_link(operation_id: str, link_id: str):
     )
 
 
-@mcp.tool()
+@mcp.tool(name="core_get_operation_link_result")
 def get_operation_link_result(operation_id: str, link_id: str):
     """
     Specify an operation id and link id to get the result of the specific link of the specific operation.
@@ -273,7 +281,7 @@ def get_operation_link_result(operation_id: str, link_id: str):
     )
 
 
-@mcp.tool()
+@mcp.tool(name="core_add_link_to_operation")
 def add_link_to_operation(
     operation_id: str, ability_id: str, ability_executor: str, paw: str
 ):
@@ -286,7 +294,7 @@ def add_link_to_operation(
     )
 
 
-@mcp.tool()
+@mcp.tool(name="core_create_adversary")
 def create_adversary(name: str, description: str, atomic_ordering: list):
     """
     Create a new adversary, specify a name, description, and atomic ordering.
@@ -310,7 +318,7 @@ def create_adversary(name: str, description: str, atomic_ordering: list):
     )
 
 
-@mcp.tool()
+@mcp.tool(name="core_create_operation")
 def create_operation(operation_name: str, adversary_name: str):
     """
     Create a new operation with the specified name and adversary.
@@ -371,7 +379,7 @@ def create_command(description: str, platform: str):
     return create_command(description=description, platform=platform)
 
 
-@mcp.tool()
+@mcp.tool(name="core_create_windows_ability")
 def create_windows_ability(
     name: str,
     description: str,
@@ -437,7 +445,7 @@ def create_windows_ability(
     return caldera_request.make_post_request("abilities", ability_body)
 
 
-@mcp.tool()
+@mcp.tool(name="core_create_linux_ability")
 def create_linux_ability(
     name: str,
     description: str,
@@ -504,7 +512,7 @@ def create_linux_ability(
     return caldera_request.make_post_request("abilities", ability_body)
 
 
-@mcp.tool()
+@mcp.tool(name="core_get_payloads")
 def get_payloads():
     """
     Returns all payloads.
