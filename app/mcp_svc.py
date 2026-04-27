@@ -17,7 +17,7 @@ class ExecuteStyle(Enum):
     RAGfactory = "rag_factory"
 
 class MCPService(BaseService):
-    def __init__(self, services):
+    def __init__(self, services, server_registry=None):
         super().__init__()
         self.services = services
         self.data_svc = services.get("data_svc")
@@ -27,7 +27,12 @@ class MCPService(BaseService):
 
         # Build RAG per run when requested
         self.rag_service = None
-        self.log.info("[MCP] Initialized MCPService")
+
+        # Registry of discovered MCP servers (caldera_core + any plugin-provided)
+        self.server_registry = server_registry or {}
+        self.log.info(
+            f"[MCP] Initialized MCPService with servers: {list(self.server_registry.keys())}"
+        )
 
     def _create_dspy_client(self, model_config: dict):
         lm = {
@@ -39,7 +44,7 @@ class MCPService(BaseService):
         }
         return lm
 
-    async def execute(self, focus: str, prompt: str, model_config: dict, file: dict = None):
+    async def execute(self, focus: str, prompt: str, model_config: dict, enabled_servers=None, file: dict = None):
         """Start MLflow run and launch async execution."""
         run = mlflow.start_run(run_name="MCP Execution")
         run_id = run.info.run_id
@@ -50,15 +55,19 @@ class MCPService(BaseService):
         if api_key:
             dspy_client = self._create_dspy_client(model_config)
 
+        if not enabled_servers:
+            enabled_servers = ["caldera_core"]
+
         # Launch background run, pass full config for RAG options
         asyncio.create_task(self._run_execution(
             focus=focus,
             prompt=prompt,
             run_id=run_id,
             lm_obj=dspy_client,
-            run_config=model_config or {}
+            run_config=model_config or {},
+            enabled_servers=enabled_servers,
         ))
-        return {"run_id": run_id}
+        return {"run_id": run_id, "enabled_servers": enabled_servers}
 
     def _build_rag_service_from_files(self, filenames, api_key: str, embed_model: str, topk: int):
         base_dir = Path(__file__).resolve().parent.parent / "data"
@@ -76,15 +85,17 @@ class MCPService(BaseService):
         rag.initialize_from_bundles(bundles, embed_model=embed_model or 'openai/text-embedding-3-small')
         return rag
 
-    async def _run_execution(self, focus, prompt, run_id, lm_obj=None, run_config: dict = None):
+    async def _run_execution(self, focus, prompt, run_id, lm_obj=None, run_config: dict = None, enabled_servers=None):
         """Executes the full DSPy logic in background and tracks via MLflow."""
         run_config = run_config or {}
+        enabled_servers = enabled_servers or ["caldera_core"]
         try:
             # Force clear any stale MLflow context from main thread
             mlflow.end_run()
             with mlflow.start_run(run_id=run_id):
                 mlflow.set_tag("stage", "initializing")
                 mlflow.log_param("prompt", prompt)
+                mlflow.log_param("enabled_servers", ",".join(enabled_servers))
 
                 # Configure LM globally if provided
                 if lm_obj and lm_obj.get("api_key"):
@@ -134,20 +145,24 @@ class MCPService(BaseService):
 
                 # Execute appropriate pipeline
                 result = {}
+                common_kwargs = dict(
+                    enabled_servers=enabled_servers,
+                    server_registry=self.server_registry,
+                )
                 if use_rag:
                     if focus in [ExecuteStyle.LLMplanner.value, ExecuteStyle.RAGplanner.value]:
                         self.log.info(f"[MCP] Executing RAG-enhanced planner with prompt: {prompt}")
-                        result = await planner_run(prompt, lm_obj, rag_context=rag_context, run_id=run_id)
+                        result = await planner_run(prompt, lm_obj, rag_context=rag_context, run_id=run_id, **common_kwargs)
                     else:
                         self.log.info(f"[MCP] Executing RAG-enhanced factory with prompt: {prompt}")
-                        result = await factory_run(prompt, lm_obj, rag_context=rag_context, run_id=run_id)
+                        result = await factory_run(prompt, lm_obj, rag_context=rag_context, run_id=run_id, **common_kwargs)
                 else:
                     if focus == ExecuteStyle.LLMplanner.value:
                         self.log.info(f"[MCP] Executing planner with prompt: {prompt}")
-                        result = await planner_run(prompt, lm_obj, run_id=run_id)
+                        result = await planner_run(prompt, lm_obj, run_id=run_id, **common_kwargs)
                     else:
                         self.log.info(f"[MCP] Executing factory with prompt: {prompt}")
-                        result = await factory_run(prompt, lm_obj, run_id=run_id)
+                        result = await factory_run(prompt, lm_obj, run_id=run_id, **common_kwargs)
 
                 mlflow.set_tag("stage", "complete")
                 mlflow.set_tag("status", "success")
