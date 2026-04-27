@@ -24,17 +24,41 @@ class McpAPI:
             focus = data.get("type", "factory")  # Default to factory if not specified
             self.log.info(f"[MCP] Execution focus: {focus}")
             model_config = data.get("config")
-            self.log.info(f"[MCP] Config received")
+            enabled_servers = data.get("enabled_servers")
+            self.log.info(f"[MCP] Config received, enabled_servers={enabled_servers}")
 
             if not user_input:
                 return web.json_response({"error": 'Missing "text" in request'}, status=400)
 
-            # Pass both focus and prompt to the service
-            result = await self.mcp_svc.execute(focus=focus, prompt=user_input, model_config=model_config)
+            result = await self.mcp_svc.execute(
+                focus=focus,
+                prompt=user_input,
+                model_config=model_config,
+                enabled_servers=enabled_servers,
+            )
             return web.json_response(result)
 
         except Exception as e:
             self.log.error(f"[MCP] Error executing request: {str(e)}")
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def list_servers(self, request):
+        """Return discovered MCP server registry for UI toggles."""
+        try:
+            registry = getattr(self.mcp_svc, "server_registry", None) or {}
+            servers = []
+            for name, info in registry.items():
+                metadata = dict(info.get("metadata") or {})
+                servers.append({
+                    "name": name,
+                    "display_name": metadata.get("display_name", name),
+                    "default_enabled": bool(metadata.get("default_enabled", False)),
+                    "description": metadata.get("description", ""),
+                })
+            servers.sort(key=lambda s: (not s["default_enabled"], s["name"]))
+            return web.json_response({"servers": servers})
+        except Exception as e:
+            self.log.error(f"[MCP] Error listing servers: {e}")
             return web.json_response({"error": str(e)}, status=500)
 
     async def status(self, request):
