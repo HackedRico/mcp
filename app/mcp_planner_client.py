@@ -9,6 +9,7 @@ from app.utility.base_world import BaseWorld
 import traceback
 from mlflow.tracking import MlflowClient
 import asyncio
+from contextlib import AsyncExitStack
 
 def get_llm_config():
     try:
@@ -59,6 +60,10 @@ def get_env(lm_settings=None):
         env['DSPY_TEMPERATURE'] = str(lm_settings.get('temperature') or 0.5)
         env['DSPY_MAX_TOKENS'] = str(lm_settings.get('max_tokens') or 10000)
 
+    # Forward Caldera credentials so each MCP server subprocess can hit the API
+    env['CALDERA_URL'] = os.environ.get('CALDERA_URL', 'http://localhost:8888/api/v2/')
+    env['CALDERA_API_KEY'] = os.environ.get('CALDERA_API_KEY', 'ADMIN123')
+
     return env
 
 mlflow.set_tracking_uri("http://localhost:5000")
@@ -67,11 +72,14 @@ mlflow.dspy.autolog()
 current_dir = os.path.dirname(os.path.abspath(__file__))
 
 class DSPyCalderaPlannerClient(dspy.Signature):
-    """You are a planner for the Caldera adversary emulation platform.  You are given a list of tools to handle user requests and control Caldera via the
-    MCP server for the Caldera API.  You will be given a user request and you will need to decide the right tools to use and use them accordinly
-    to fulfill the user request and conduct an adversary emulation operation.
-    """
+    """You are a planner for the Caldera adversary emulation platform.
+    You have access to MCP tool servers that wrap Caldera's core API and any
+    installed plugins. Your job is to PLAN and EXECUTE operations using
+    existing abilities and adversaries.
 
+    Prefer reusing existing artifacts over creating new ones. Use range or
+    infrastructure tools only when the operation requires live targets.
+    """
     adversary_emulation_task: str = dspy.InputField()
     process_result: str = dspy.OutputField(
         desc=(
@@ -80,13 +88,17 @@ class DSPyCalderaPlannerClient(dspy.Signature):
     )
 
 class DSPyCalderaPlannerClientWithRAG(dspy.Signature):
-    """You are a planner for the Caldera adversary emulation platform enhanced with Cyber Threat Intelligence (CTI) data.
-    You are given a list of tools to handle user requests and control Caldera via the MCP server for the Caldera API.
-    You also have access to CTI context that provides information about attack patterns, malware, tools, threat actors, and techniques.
-    Use the CTI context to plan more realistic and comprehensive adversary emulation operations based on real-world threat intelligence.
-    When planning operations, consider the attack patterns and techniques used by real threat actors to create more authentic scenarios.
-    """
+    """You are a planner for the Caldera adversary emulation platform,
+    enhanced with Cyber Threat Intelligence (CTI) data. You have access to MCP
+    tool servers that wrap Caldera's core API and any installed plugins. Your
+    job is to PLAN and EXECUTE operations informed by CTI, using existing
+    abilities and adversaries.
 
+    Prefer reusing existing artifacts over creating new ones. Use range or
+    infrastructure tools only when the operation requires live targets.
+    Ground your plan in the provided CTI context so the operation mirrors
+    real-world threat actor behavior.
+    """
     adversary_emulation_task: str = dspy.InputField()
     cti_context: str = dspy.InputField(
         desc="Relevant CTI (Cyber Threat Intelligence) information including attack patterns, techniques, and threat actor behaviors"
@@ -122,7 +134,7 @@ def format_rag_context(rag_context):
             formatted_parts.append(f"{ctx['description']}")
     return "\n".join(formatted_parts)
 
-async def run(adversary_emulation_task: str, lm_obj=None, rag_context=None, run_id=None):
+async def run(adversary_emulation_task: str, lm_obj=None, rag_context=None, run_id=None, enabled_servers=None, server_registry=None):
     """
     lm_obj can be:
       - a dict with keys like model, api_key, api_base, temperature, max_tokens, offline
@@ -156,64 +168,98 @@ async def run(adversary_emulation_task: str, lm_obj=None, rag_context=None, run_
     mlflow.set_tag("stage", "initializing")
     mlflow.log_param("prompt", adversary_emulation_task)
 
-    # Create server params with LLM settings passed via environment
-    server_params = StdioServerParameters(
-        command="python",
-        args=[current_dir+"/mcp_server.py"],
-        env=get_env(lm_settings),
-    )
+    # Resolve which MCP servers to spawn
+    if not enabled_servers:
+        enabled_servers = ["caldera_core"]
+    if server_registry is None:
+        server_registry = {
+            "caldera_core": {
+                "path": os.path.join(current_dir, "mcp_server.py"),
+                "metadata": {"display_name": "CALDERA Core", "default_enabled": True},
+            }
+        }
+
+    mlflow.log_param("enabled_servers", ",".join(enabled_servers))
+
+    # Bump max iters when non-core servers are in the mix (realistic runs need more)
+    if any(name != "caldera_core" for name in enabled_servers) and max_tool_calls < 10:
+        max_tool_calls = 10
+    mlflow.log_param("max_tool_calls", max_tool_calls)
 
     try:
-        async with stdio_client(server_params) as (read, write):
-            async with ClientSession(read, write) as session:
-                print("[MCP] Initializing MCP session...")
-                mlflow.set_tag("stage", "initializing MCP session")
+        async with AsyncExitStack() as stack:
+            sessions = []
+            for server_name in enabled_servers:
+                if server_name not in server_registry:
+                    raise ValueError(f"Unknown MCP server: {server_name}")
+                info = server_registry[server_name]
+                params = StdioServerParameters(
+                    command="python",
+                    args=[str(info["path"])],
+                    env=get_env(lm_settings),
+                )
+                mlflow.set_tag("stage", f"initializing MCP session: {server_name}")
+                read, write = await stack.enter_async_context(stdio_client(params))
+                session = await stack.enter_async_context(ClientSession(read, write))
                 await session.initialize()
+                sessions.append(session)
 
-                mlflow.set_tag("stage", "listing tools")
-                tools = await session.list_tools()
-
-                dspy_tools = [dspy.Tool.from_mcp_tool(session, tool) for tool in tools.tools]
-
-                # Use per-call LM context, honoring lm_obj if provided
-                with dspy.context(lm=lm_instance):
-                    mlflow.set_tag("stage", "creating DSPy ReAct instance")
-                    if rag_context:
-                        signature = DSPyCalderaPlannerClientWithRAG
-                        formatted_context = format_rag_context(rag_context)
-
-                        # Log CTI context being sent to LLM for verification
-                        mlflow.log_param("cti_context_preview", formatted_context[:1000])  # First 1000 chars
-                        mlflow.set_tag("cti_context_length", len(formatted_context))
-                        mlflow.set_tag("cti_search_results_count", len(rag_context.get("search_results", [])))
-                        mlflow.set_tag("cti_detailed_context_count", len(rag_context.get("detailed_context", [])))
-                        print(f"[MCP] Passing CTI context to LLM ({len(formatted_context)} chars)")
-
-                        react = dspy.ReAct(signature, tools=dspy_tools, max_iters=max_tool_calls)
-                        mlflow.set_tag("stage", "executing DSPy ReAct with RAG")
-                        result = await react.acall(
-                            adversary_emulation_task=adversary_emulation_task,
-                            cti_context=formatted_context
+            # Merge tools across all sessions with collision detection
+            mlflow.set_tag("stage", "listing tools")
+            seen = {}
+            dspy_tools = []
+            for server_name, session in zip(enabled_servers, sessions):
+                tool_list = (await session.list_tools()).tools
+                for tool in tool_list:
+                    if tool.name in seen:
+                        raise ValueError(
+                            f"Tool name collision: '{tool.name}' defined by both "
+                            f"'{seen[tool.name]}' and '{server_name}'. "
+                            f"Namespace tool names with a server prefix."
                         )
-                    else:
-                        signature = DSPyCalderaPlannerClient
-                        react = dspy.ReAct(signature, tools=dspy_tools, max_iters=max_tool_calls)
-                        mlflow.set_tag("stage", "executing DSPy ReAct")
-                        result = await react.acall(
-                            adversary_emulation_task=adversary_emulation_task
-                        )
+                    seen[tool.name] = server_name
+                    dspy_tools.append(dspy.Tool.from_mcp_tool(session, tool))
+            mlflow.log_param("tool_count", len(dspy_tools))
 
-                mlflow.set_tag("stage", "completed")
-                mlflow.set_tag("status", "complete")
-                mlflow.set_tag("reasoning", result.reasoning)
-                mlflow.set_tag("process_result", result.process_result)
-                for k, v in result.trajectory.items():
-                    mlflow.set_tag(k, json.dumps(v) if isinstance(v, (dict, list)) else str(v))
+            # Use per-call LM context, honoring lm_obj if provided
+            with dspy.context(lm=lm_instance):
+                mlflow.set_tag("stage", "creating DSPy ReAct instance")
+                if rag_context:
+                    signature = DSPyCalderaPlannerClientWithRAG
+                    formatted_context = format_rag_context(rag_context)
 
-                mlflow.log_param("result_summary", result.process_result)
-                mlflow.end_run()
-                print(json.dumps(result.toDict(), indent=4))
-                return {"process_result": result.process_result}
+                    # Log CTI context being sent to LLM for verification
+                    mlflow.log_param("cti_context_preview", formatted_context[:1000])  # First 1000 chars
+                    mlflow.set_tag("cti_context_length", len(formatted_context))
+                    mlflow.set_tag("cti_search_results_count", len(rag_context.get("search_results", [])))
+                    mlflow.set_tag("cti_detailed_context_count", len(rag_context.get("detailed_context", [])))
+                    print(f"[MCP] Passing CTI context to LLM ({len(formatted_context)} chars)")
+
+                    react = dspy.ReAct(signature, tools=dspy_tools, max_iters=max_tool_calls)
+                    mlflow.set_tag("stage", "executing DSPy ReAct with RAG")
+                    result = await react.acall(
+                        adversary_emulation_task=adversary_emulation_task,
+                        cti_context=formatted_context
+                    )
+                else:
+                    signature = DSPyCalderaPlannerClient
+                    react = dspy.ReAct(signature, tools=dspy_tools, max_iters=max_tool_calls)
+                    mlflow.set_tag("stage", "executing DSPy ReAct")
+                    result = await react.acall(
+                        adversary_emulation_task=adversary_emulation_task
+                    )
+
+            mlflow.set_tag("stage", "completed")
+            mlflow.set_tag("status", "complete")
+            mlflow.set_tag("reasoning", result.reasoning)
+            mlflow.set_tag("process_result", result.process_result)
+            for k, v in result.trajectory.items():
+                mlflow.set_tag(k, json.dumps(v) if isinstance(v, (dict, list)) else str(v))
+
+            mlflow.log_param("result_summary", result.process_result)
+            mlflow.end_run()
+            print(json.dumps(result.toDict(), indent=4))
+            return {"process_result": result.process_result}
 
     except Exception as e:
         tb = traceback.format_exc()
