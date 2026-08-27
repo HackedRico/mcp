@@ -1,5 +1,6 @@
 from aiohttp import web
 import logging
+import re
 import mlflow
 import os
 import json
@@ -11,7 +12,7 @@ from pathlib import Path
 from datetime import datetime
 
 from plugins.mcp.app.config import llm_defaults
-from plugins.mcp.app.utilities.llm_client import load_config
+from plugins.mcp.app.utilities.llm_client import load_config, reload_config
 from plugins.mcp.app.utilities.paths import get_mcp_data_dir, get_mcp_root
 from plugins.mcp.app.cti_ingest_svc import CTIIngestService
 
@@ -23,6 +24,26 @@ _RAG_DEFAULTS = {
     "rag_embed_model": "openai/text-embedding-3-small",
     "rag_topk": 5,
 }
+
+# conf/local.yml is plaintext on disk beside tracked config, so credentials
+# never go in it. They come from .env or the per-session UI.
+# Matched by name rather than listed: the UI keeps growing key fields
+# (embed_api_key, plan_api_key, cti_rag_api_key) and a list keeps missing them.
+# api_key_env names a variable, not a value, so it is kept.
+_SECRET_KEY_NAME = re.compile(r"api_?key", re.IGNORECASE)
+
+
+def _is_secret(name) -> bool:
+    return bool(_SECRET_KEY_NAME.search(str(name))) and not str(name).endswith("_env")
+
+
+def _without_secrets(value):
+    """Recursive: callers have posted nested shapes, so one level is not enough."""
+    if isinstance(value, dict):
+        return {k: _without_secrets(v) for k, v in value.items() if not _is_secret(k)}
+    if isinstance(value, list):
+        return [_without_secrets(v) for v in value]
+    return value
 
 class McpAPI:
 
@@ -953,12 +974,17 @@ class McpAPI:
                 if isinstance(cfg, dict):
                     existing[section] = cfg
 
-            # 3️⃣ Write merged config back
+            # 3️⃣ Scrub secrets from the whole file, not just the posted
+            # sections, so a save also clears a key an earlier build wrote.
+            existing = _without_secrets(existing)
+
+            # 4️⃣ Write merged config back
             with local_path.open("w", encoding="utf-8") as f:
                 yaml.safe_dump(existing, f, sort_keys=False)
 
-            # 4️⃣ Reload effective config in memory
-            self.services["config"] = load_config()
+            # 5️⃣ Reload effective config. load_config is lru_cached, so the
+            # cache must be cleared or this reads back the pre-write contents.
+            self.services["config"] = reload_config()
 
             self.log.info(f"[MCP] Config updated in {conf_dir}/local.yml")
 

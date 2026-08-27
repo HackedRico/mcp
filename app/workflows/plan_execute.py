@@ -86,9 +86,28 @@ def get_env(lm_settings=None):
 
     return env
 
+# set_tracking_uri and autolog are local state and stay eager. autolog must:
+# it calls dspy.settings.configure, which pins ownership to the first asyncio
+# task that reaches it, so deferring it into run() breaks the second workflow.
 mlflow.set_tracking_uri(mlflow_settings()['tracking_uri'])
-mlflow.set_experiment("caldera-mcp-client-1")
 mlflow.dspy.autolog()
+
+_MLFLOW_EXPERIMENT_SET = False
+
+
+def _ensure_mlflow():
+    """set_experiment is the network call, so it cannot run at import time.
+
+    At module scope it made importing this module block whenever the tracking
+    server was down, which silently dropped both workflows from the registry.
+    """
+    global _MLFLOW_EXPERIMENT_SET
+    if _MLFLOW_EXPERIMENT_SET:
+        return
+    mlflow.set_experiment("caldera-mcp-client-1")
+    _MLFLOW_EXPERIMENT_SET = True
+
+
 current_dir = os.path.dirname(os.path.abspath(__file__))
 
 
@@ -144,6 +163,7 @@ async def run(adversary_emulation_task: str, lm_obj=None, rag_context=None,
       - None, to fall back to llm_defaults() from the shared config module
         (used by tests / direct invocation)
     """
+    _ensure_mlflow()
     if isinstance(lm_obj, dspy.LM):
         lm_instance = lm_obj
         lm_settings = None

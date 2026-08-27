@@ -540,11 +540,46 @@ const availableCapabilities = ref([])
 const availableServers = ref([])
 
 const LOCAL_STORAGE_KEY = 'mcp_global_config'
+// Bumped when a stored field stops being safe to reuse. v2 drops a cached
+// apiBase: the endpoint moved out of the repo into MCP_LLM_API_BASE, and a
+// value saved before that outranks it on every request, silently routing to
+// an endpoint the deployment no longer configures.
+const CONFIG_SCHEMA_VERSION = 2
+
+// localStorage is readable by anything on this origin, so keys live in memory
+// for the session only. Matched by name at any depth: a fixed list missed
+// embed_api_key and plan_api_key nested under capabilitySettings.
+const SECRET_KEY_NAME = /api_?key/i
+
+function stripSecrets(value) {
+  if (Array.isArray(value)) return value.map(stripSecrets)
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value)
+        .filter(([k]) => !SECRET_KEY_NAME.test(k))
+        .map(([k, v]) => [k, stripSecrets(v)]),
+    )
+  }
+  return value
+}
+
+// Named endpoint profiles keep their apiBase: those are explicit user
+// artifacts, applied deliberately. Only the ambient default is dropped.
+function migrate(config) {
+  if (config.schemaVersion === CONFIG_SCHEMA_VERSION) return config
+  const { apiBase, ...rest } = config
+  return { ...rest, schemaVersion: CONFIG_SCHEMA_VERSION }
+}
 
 function loadConfig() {
   try {
     const saved = localStorage.getItem(LOCAL_STORAGE_KEY)
-    if (saved) return JSON.parse(saved)
+    if (!saved) return null
+    const parsed = migrate(stripSecrets(JSON.parse(saved)))
+    const cleaned = JSON.stringify(parsed)
+    // Rewrite now rather than waiting for the next save.
+    if (cleaned !== saved) localStorage.setItem(LOCAL_STORAGE_KEY, cleaned)
+    return parsed
   } catch (e) {
     console.warn('[MCP] Failed to load saved config:', e)
   }
@@ -553,7 +588,10 @@ function loadConfig() {
 
 function saveConfig(config) {
   try {
-    localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(config))
+    localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify({
+      ...stripSecrets(config),
+      schemaVersion: CONFIG_SCHEMA_VERSION,
+    }))
   } catch (e) {
     console.warn('[MCP] Failed to save config:', e)
   }
