@@ -212,7 +212,7 @@ async def run(adversary_emulation_task: str, lm_obj=None, rag_context=None,
                     "display_name": "CTI Pipeline",
                     "default_enabled": True,
                     "description": (
-                        "CTI ingest -> STIX -> topology -> deploy spec -> "
+                        "CTI ingest -> STIX -> adversary -> "
                         "deploy -> operation -> detection-validation tools."
                     ),
                 },
@@ -379,7 +379,7 @@ WORKFLOWS = [
         description=PLAN_EXECUTE_DESCRIPTION,
         signature=DSPyCalderaPlannerClient,
         required_servers=["caldera_core"],
-        optional_servers=["cti_pipeline", "range"],
+        optional_servers=["cti_pipeline"],
         accepted_capabilities=["rag"],
         mlflow_experiment=_MLFLOW_EXPERIMENT,
         ui_component="plan_execute.vue",

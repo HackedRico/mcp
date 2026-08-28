@@ -122,136 +122,6 @@ class McpAPI:
             return self.services.get(name)
         except Exception:
             return None
-
-    @staticmethod
-    def _count_catalog_items(value):
-        if isinstance(value, dict):
-            return sum(
-                len(v) for v in value.values()
-                if isinstance(v, (list, tuple, set))
-            )
-        if isinstance(value, (list, tuple, set)):
-            return len(value)
-        return 0
-
-    def _range_supported_providers(self, profiles):
-        try:
-            from plugins.range.app.onprem_svc import SUPPORTED_PROVIDERS
-            return sorted(SUPPORTED_PROVIDERS.keys())
-        except Exception as e:
-            self.log.debug(f"[MCP] Could not import Range provider registry: {e}")
-
-        names = {
-            str(p.get("provider"))
-            for p in profiles
-            if isinstance(p, dict) and p.get("provider")
-        }
-        return sorted(names)
-
-    def _range_images_for_provider(self, range_svc, provider):
-        inventory = Path(
-            getattr(range_svc, "images_inventory", "plugins/range/conf/onprem_images.yml")
-        )
-        if not inventory.exists():
-            return []
-
-        try:
-            with inventory.open("r") as f:
-                data = yaml.safe_load(f) or {}
-        except Exception as e:
-            self.log.warning(f"[MCP] Could not read Range image inventory: {e}")
-            return []
-
-        images = []
-        credential_store = getattr(range_svc, "credential_store", None)
-        for meta in data.get("images", []) or []:
-            if not isinstance(meta, dict):
-                continue
-            entry_provider = meta.get("provider")
-            if entry_provider and entry_provider != provider:
-                continue
-
-            has_credentials = bool(meta.get("credentials"))
-            username = None
-            if has_credentials and credential_store is not None:
-                try:
-                    decrypted = credential_store.decrypt_credentials(meta)
-                    if decrypted:
-                        username = decrypted.get("ansible_user")
-                except Exception as e:
-                    self.log.debug(f"[MCP] Could not reveal Range image username: {e}")
-
-            images.append({
-                "file": meta.get("file", ""),
-                "name": meta.get("name", ""),
-                "os": meta.get("os", ""),
-                "default_cpu": meta.get("cpus", meta.get("default_cpu", 1)),
-                "default_memory": meta.get("memory", meta.get("default_memory", 4096)),
-                "default_storage": meta.get("storage", meta.get("default_storage", 50)),
-                "has_credentials": has_credentials,
-                "username": username,
-            })
-        return images
-
-    def _range_feature_catalog(self):
-        range_svc = self._registered_service("range_svc")
-        if range_svc is None:
-            return {
-                "available": False,
-                "error": "Range service is not registered",
-                "providers": [],
-                "features": {"default": [], "custom": []},
-                "feature_count": 0,
-            }
-
-        features = {"default": [], "custom": []}
-        feature_error = None
-        try:
-            features = range_svc.get_feature_playbooks()
-        except Exception as e:
-            feature_error = str(e)
-            self.log.warning(f"[MCP] Could not load Range feature playbooks: {e}")
-
-        profiles = [
-            p for p in getattr(range_svc, "profiles", []) or []
-            if isinstance(p, dict) and p.get("range") == "onprem"
-        ]
-        provider_names = self._range_supported_providers(profiles)
-        providers = []
-        images_by_provider = {}
-        for name in provider_names:
-            images = self._range_images_for_provider(range_svc, name)
-            images_by_provider[name] = images
-            provider_profiles = [
-                p.get("profile") for p in profiles
-                if p.get("provider") == name and p.get("profile")
-            ]
-            providers.append({
-                "name": name,
-                "provider": name,
-                "supported": True,
-                "profile_count": len(provider_profiles),
-                "profiles": provider_profiles,
-                "image_count": len(images),
-            })
-
-        payload = {
-            "available": True,
-            "providers": providers,
-            "features": features,
-            "feature_count": self._count_catalog_items(features),
-            "images_by_provider": images_by_provider,
-            "endpoints": {
-                "providers": "/plugin/range/onprem/providers",
-                "images": "/plugin/range/onprem/images?provider=<provider>",
-                "features": "/plugin/range/onprem/features",
-                "microvm_substrate": "/plugin/range/microvm/substrate-status",
-            },
-        }
-        if feature_error:
-            payload["feature_error"] = feature_error
-        return payload
-
     async def execute(self, request):
         """POST /plugin/mcp/execute.
 
@@ -373,9 +243,7 @@ class McpAPI:
         """Return discovered Workflow registry so the UI can render cards.
 
         Workflows whose required servers are not all present in the discovered
-        server registry are filtered out, since they cannot run anyway. This
-        keeps a workflow card from appearing for, say, "Range Architect" when
-        the RANGE plugin is not installed.
+        server registry are filtered out, since they cannot run anyway.
         """
         try:
             return web.json_response({"workflows": self._mcp_workflow_catalog()})
@@ -392,13 +260,7 @@ class McpAPI:
             return web.json_response({"error": str(e)}, status=500)
 
     async def features(self, request):
-        """Return the MCP-facing feature catalog in one API call.
-
-        /plugin/mcp/capabilities describes prompt-time MCP capabilities.
-        Range feature playbooks are the deploy-time features Plan and
-        Execute uses for infrastructure. This aggregate keeps API clients
-        from stitching those separate catalogs together themselves.
-        """
+        """Return the MCP-facing feature catalog in one API call."""
         try:
             return web.json_response({
                 "mcp": {
@@ -411,7 +273,6 @@ class McpAPI:
                         "capabilities": "/plugin/mcp/capabilities",
                     },
                 },
-                "range": self._range_feature_catalog(),
             })
         except Exception as e:
             self.log.error(f"[MCP] Error listing feature catalog: {e}")
@@ -1000,26 +861,22 @@ class McpAPI:
         """POST /plugin/mcp/workflows/run-ae-end-to-end.
 
         Invokes the in-process ``ae-e2e`` workflow directly (bypassing the
-        DSPy / LM pipeline used by /plugin/mcp/execute). The whole 12-stage
-        state machine runs to completion in the request handler and returns
-        the final state dict so callers can show stage statuses immediately
-        without polling /status.
+        DSPy / LM pipeline used by /plugin/mcp/execute). Runs every stage to
+        completion in the request handler and returns the final state dict so
+        callers can show stage statuses without polling /status.
 
         Request body (all optional except cti_source for fresh runs):
             {
-              "cti_source": "mcpBKP/.../blackcat.pdf",
-              "profile_name": "blackcat-e2e",
+              "cti_source": "raw/uploads/report.pdf",
               "dry_run": false,
-              "start_stage": "deploy",
+              "start_stage": "cti",
               "only_stage": null,
               "checkpoint_path": "/tmp/e2e_full_vision_state.json",
               "elk_url": "http://192.168.66.1:9200",
               "kibana_url": "http://192.168.66.1:5601",
-              "microvm_base": "/tmp/timestone-microvms",
               "adversary_slug": "alphv_blackcat",
               "agents_timeout": 600,
               "operation_timeout": 1800,
-              "deploy_timeout": 1200,
               "cti_timeout": 900
             }
         """
