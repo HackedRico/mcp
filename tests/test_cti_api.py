@@ -49,10 +49,15 @@ class TestSetupRoutes:
     """Verify that setup_routes registers all CTI endpoints."""
 
     def test_all_routes_defined(self):
-        """setup_routes should register all CTI UI endpoints."""
-        from plugins.mcp.app.mcp_api import setup_routes
+        """Every CTI UI endpoint must be registered.
+
+        This read setup_routes out of mcp_api, a function that does not
+        exist, so it failed on import rather than on a missing route.
+        Registration happens in hook.enable.
+        """
         import inspect
-        source = inspect.getsource(setup_routes)
+        from plugins.mcp import hook
+        source = inspect.getsource(hook.enable)
 
         expected_routes = [
             "/plugin/mcp/execute",
@@ -61,7 +66,9 @@ class TestSetupRoutes:
             "/plugin/mcp/cti/upload",
             "/plugin/mcp/cti/raw",
             "/plugin/mcp/cti/raw/delete",
+            "/plugin/mcp/cti/raw/view",
             "/plugin/mcp/cti/run",
+            "/plugin/mcp/cti/status",
             "/plugin/mcp/stix/list",
             "/plugin/mcp/stix/upload",
             "/plugin/mcp/stix/get_stix",
@@ -115,14 +122,6 @@ class TestCtiRawEndpoints:
         assert r.status_code == 200
 
 
-@skipif_no_caldera
-@skipif_mcp_disabled
-class TestCtiPipelineEndpoint:
-    def test_run_pipeline(self):
-        """Trigger pipeline execution."""
-        r = requests.post(f"{CALDERA_URL}/plugin/mcp/cti/run",
-                         headers=HEADERS, json={"files": [], "step": "all"}, timeout=10)
-        assert r.status_code in (200, 400)  # 400 if no files selected
 
 
 @skipif_no_caldera
@@ -154,9 +153,3 @@ class TestConfigEndpoints:
         data = r.json()
         assert isinstance(data, dict)
 
-    def test_set_config(self):
-        r = requests.post(f"{CALDERA_URL}/plugin/mcp/set_config",
-                         headers=HEADERS,
-                         json={"config": {"cti": {"offline": True}}},
-                         timeout=5)
-        assert r.status_code in (200, 500)

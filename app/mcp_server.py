@@ -1,21 +1,24 @@
 import os
 from mcp.server.fastmcp import FastMCP
-from pydantic import BaseModel
+from typing import Optional
+
 import requests
 from datetime import datetime
-import time
 import collections
 import uuid
 import sys
 from pathlib import Path
 
-from dspy_env import CreateCommand
-
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from plugins.mcp.app.config import caldera_connection, _normalise_api_url
+# Both of these have to come after the path insert above. The first was a bare
+# "from dspy_env import" sitting before it, which resolved only when sys.path[0]
+# happened to be this directory, so importing this module any other way failed
+# with ModuleNotFoundError.
+from plugins.mcp.app.dspy_env import CreateCommand  # noqa: E402
+from plugins.mcp.app.config import caldera_connection, _normalise_api_url  # noqa: E402
 
 MCP_METADATA = {
     "display_name": "CALDERA Core",
@@ -169,7 +172,7 @@ def get_adversaries():
 
 
 @mcp.tool(name="core_get_adversary_by_ability_id")
-def get_adversary_by_ability_id(ability_id: str, ability_name: str = None):
+def get_adversary_by_ability_id(ability_id: str, ability_name: Optional[str] = None):
     """
     Filters all Caldera adversaries by the specifies ability id or ability name.
     """
@@ -329,7 +332,7 @@ def create_adversary(name: str, description: str, atomic_ordering: list):
     adversary_id = str(uuid.uuid4())
 
     return caldera_request.make_post_request(
-        f"adversaries",
+        "adversaries",
         {
             "adversary_id": adversary_id,
             "name": name,
@@ -346,16 +349,22 @@ def create_operation(operation_name: str, adversary_name: str):
 
     Args:
         operation_name: Name for the operation
-        adversary_id: ID of the adversary to use for this operation
+        adversary_name: Name of the adversary to use for this operation
 
     Returns:
-        The response from the Caldera API or None if adversary details cannot be fetched
+        The response from the Caldera API, or an error dict when the
+        adversary cannot be found.
     """
     req = caldera_request.make_get_request("adversaries")
-    found_adversaries = []
-    for adversary in req:
-        if adversary["name"] == adversary_name:
-            found_adversaries.append(adversary)
+    if not isinstance(req, list):
+        return {"error": "could not list adversaries", "response": req}
+
+    found_adversaries = [
+        a for a in req
+        if isinstance(a, dict) and a.get("name") == adversary_name
+    ]
+    if not found_adversaries:
+        return {"error": f"no adversary named {adversary_name!r}"}
 
     adversary_details = found_adversaries[0]
 
@@ -375,9 +384,12 @@ def create_operation(operation_name: str, adversary_name: str):
             },
             "objective": "495a9828-cab1-44dd-a0ca-66e58177d8cc",
         },
-        "planner_id": "aaa7c857-37a0-4c4a-85f7-4e9f7f30e31a",
-        "source_id": "ed32b9c3-9593-4c33-b0db-e2007315096b",
-        "objective_id": "495a9828-cab1-44dd-a0ca-66e58177d8cc",
+        # setup_operation pops 'planner' and 'source' as nested dicts and
+        # OperationSchema discards every other key, so the *_id spellings
+        # this used to send were dropped and Caldera silently fell back to
+        # its own defaults.
+        "planner": {"id": "atomic"},
+        "source": {"id": "basic"},
         "state": "paused",
         "autonomous": 1,
         "auto_close": False,
@@ -407,8 +419,8 @@ def create_windows_ability(
     command_description: str,
     tactic: str,
     technique_name: str,
-    technique_id: str = None,
-    payloads: list = None,
+    technique_id: Optional[str] = None,
+    payloads: Optional[list] = None,
 ):
     """
     Create a new windows ability with the specified parameters.
@@ -473,8 +485,8 @@ def create_linux_ability(
     command_description: str,
     tactic: str,
     technique_name: str,
-    technique_id: str = None,
-    payloads: list = None,
+    technique_id: Optional[str] = None,
+    payloads: Optional[list] = None,
 ):
     """
     Create a new linux ability with the specified parameters.

@@ -2,8 +2,6 @@
 Pytest configuration and shared fixtures for MCP plugin tests.
 """
 import sys
-import json
-import asyncio
 from pathlib import Path
 
 import pytest
@@ -12,16 +10,66 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1].parents[1]))
 
 MCP_ROOT = Path(__file__).resolve().parents[1]
+LOCAL_YML = MCP_ROOT / "conf" / "local.yml"
 DATA_DIR = MCP_ROOT / "data"
 CLEAN_DIR = DATA_DIR / "clean"
 TAXONOMY_PATH = MCP_ROOT / "app" / "utilities" / "cti_taxonomy" / "enterprise_attack.json"
 
 
+@pytest.fixture(autouse=True)
+def _preserve_local_yml():
+    """No test may leave the operator's conf/local.yml changed.
+
+    Several suites POST to a running server, so their writes land in the real
+    file. That is how a deployment ended up pinned to a gateway nobody chose,
+    and the server rewrites the file with yaml.safe_dump, so the comments go
+    too. set_config only merges, so a POST cannot undo one: the file has to be
+    restored on disk.
+
+    Autouse and unconditional, because the next suite to grow a live POST
+    should not have to remember this.
+
+    It restores the file, not the running server. set_config caches what it
+    wrote, so a live POST kept being served from memory after the file was put
+    back, the browser read it from /defaults, and the panel wrote it to disk
+    again. The tests that did that are gone; this stays as the backstop.
+    """
+    before = LOCAL_YML.read_text(encoding="utf-8") if LOCAL_YML.exists() else None
+    try:
+        yield
+    finally:
+        after = LOCAL_YML.read_text(encoding="utf-8") if LOCAL_YML.exists() else None
+        if after == before:
+            return
+        if before is None:
+            LOCAL_YML.unlink(missing_ok=True)
+        else:
+            LOCAL_YML.write_text(before, encoding="utf-8")
+
+
+# The live suites upload through the running server, so their fixtures land in
+# the operator's real data/. Named pytest_* or test_* by convention; this
+# sweeps whatever they leave.
+_TEST_UPLOAD_PREFIXES = ("pytest_", "test_cti.")
+
+
+@pytest.fixture(autouse=True)
+def _sweep_test_uploads():
+    yield
+    for sub in ("raw/uploads", "raw/processed", "clean"):
+        d = DATA_DIR / sub
+        if not d.is_dir():
+            continue
+        for f in d.iterdir():
+            if f.is_file() and f.name.startswith(_TEST_UPLOAD_PREFIXES):
+                f.unlink(missing_ok=True)
+
+
 @pytest.fixture(scope="session")
 def nlp():
     """Shared spaCy model (loaded once per test session)."""
-    from plugins.mcp.app.utilities.nlp_model import nlp
-    return nlp
+    from plugins.mcp.app.utilities.nlp_model import get_nlp
+    return get_nlp()
 
 
 @pytest.fixture(scope="session")
@@ -75,12 +123,12 @@ def sample_ir():
 def sample_stix_bundle():
     """Sample STIX 2.1 bundle for testing."""
     from plugins.mcp.app.utilities.cti_stix_builders import (
-        make_malware, make_tool, make_threat_actor, make_bundle,
+        make_attack_pattern, make_threat_actor, make_bundle,
     )
+    from plugins.mcp.app.utilities.cti_taxonomy_loader import load_mitre_taxonomy
 
     objects = [
-        make_malware({"name": "TestMalware"}),
-        make_tool({"name": "TestTool"}),
         make_threat_actor({"name": "TestActor"}),
+        make_attack_pattern({"id": "T1486"}, load_mitre_taxonomy()),
     ]
     return make_bundle([o for o in objects if o])

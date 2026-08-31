@@ -7,15 +7,15 @@ from typing import Any
 
 PLAN_EXECUTE_DESCRIPTION = (
     "Turn CTI into an adversary-emulation run. Select or upload CTI/STIX, "
-    "extract STIX 2.1 entities, seed a fact source, build an adversary "
+    "extract STIX 2.1 entities, build an adversary "
     "from the observed techniques, run the CALDERA operation against available "
-    "agents, and summarize detection coverage."
+    "agents, and report which techniques it covered."
 )
 
 
 PLAN_EXECUTE_EXAMPLES = [
-    "Create the BlackCat adversary from the selected STIX, run it against my agents, and summarize detections.",
-    "Fuse the selected STIX bundles, infer the victim infrastructure, and tell me which hosts and services it implies.",
+    "Create the BlackCat adversary from the selected STIX, run it against my agents, and report coverage.",
+    "Fuse the selected STIX bundles and tell me which techniques have no matching CALDERA ability.",
     "Convert this raw CTI into STIX 2.1 and identify any operator-review gaps.",
     "Plan an emulation against the Discovery adversary on my available agents.",
 ]
@@ -40,24 +40,22 @@ them into one bundle first. If no bundle is selected, use CTI tools only
 when the user's prompt asks for CTI ingest or discovery.
 
 Execution contract:
-- Do not fabricate hosts, users, domains, services, credentials, or network
-  edges. Use only what the CTI pipeline, tool observations, or user supplied
-  context support.
+- The CTI tells you which techniques to run. It does not describe this
+  estate, so never answer a question about this environment from it.
 - If the CTI does not name something the plan needs, return it for operator
   review instead of inventing a substitute.
 - Run operations against agents that have already checked in. If no agent is
   available, say so rather than assuming one.
-- When the CTI names hosts, accounts or domains, build a fact source from the
-  bundle and run the operation against it, so the run uses values the report
-  stated rather than placeholders.
+- Operations run against Caldera's fact source, not the report. A report
+  describes the previous victim; facts about this estate are discovered at
+  runtime or supplied by the operator.
 
-GROUNDING - non-negotiable: every concrete fact in your output (host names,
-user accounts, technique IDs, ability ids, infrastructure types, file paths,
-IP addresses, service names) MUST come from a
-tool call result, operation_context, chat_history, or the user's input in this
-turn. Do NOT invent or recall such facts from training data. When a tool
-returns no data, say so explicitly and name what is missing instead of filling
-the gap with plausible-sounding values.
+GROUNDING - non-negotiable: every concrete fact in your output (technique
+IDs, ability ids, adversary ids, agent paws, operation ids, coverage counts)
+MUST come from a tool call result, operation_context, chat_history, or the
+user's input in this turn. Do NOT invent or recall such facts from training
+data. When a tool returns no data, say so explicitly and name what is missing
+instead of filling the gap with plausible-sounding values.
 
 AGNOSTIC TO INPUT - your reasoning must apply equally to any CTI domain:
 ransomware, APT campaigns, ICS/OT incidents, supply-chain reports, insider
@@ -88,24 +86,23 @@ as the operator's intended CTI set. If multiple bundles are selected, fuse
 them into one bundle first.
 
 Execution contract:
-- Do not fabricate hosts, users, domains, services, credentials, or network
-  edges. Use only what cti_context, operation_context, tool observations, or
-  the user's prompt support.
-- If the CTI does not name a host, user or domain the plan needs, return an
-  operator-review gap instead of inventing one.
+- The CTI tells you which techniques to run. It does not describe this
+  estate, so never answer a question about this environment from it.
+- If a technique the CTI names has no matching ability, report it as an
+  operator-review gap instead of substituting a different technique.
 - Run operations against agents that have already checked in, or clearly
   report that no suitable agent is available.
-- When cti_context names hosts, accounts or domains, build a fact source from
-  the bundle so the operation runs on report-grounded values.
+- Operations run against Caldera's fact source, not the report. A report
+  describes the previous victim; facts about this estate are discovered at
+  runtime or supplied by the operator.
 
-GROUNDING - non-negotiable: every concrete fact you emit (host names, user
-accounts, technique IDs, software names, infrastructure types, file paths, IP
-addresses, service names) MUST come from cti_context,
-operation_context, a tool-call result, chat_history, or the user's input this
-turn. Never invent or recall such facts from training data. If cti_context is
-silent on something the user asked about, call the appropriate CTI tool first;
-if no tool can supply it, say so explicitly. Quote short CTI phrases only when
-they are needed to justify a plan decision.
+GROUNDING - non-negotiable: every concrete fact you emit (technique IDs,
+ability ids, adversary ids, agent paws, operation ids, coverage counts) MUST
+come from cti_context, operation_context, a tool-call result, chat_history, or
+the user's input this turn. Never invent or recall such facts from training
+data. If cti_context is silent on something the user asked about, call the
+appropriate CTI tool first; if no tool can supply it, say so explicitly. Quote
+short CTI phrases only when they are needed to justify a plan decision.
 
 AGNOSTIC TO INPUT - your reasoning must apply equally to any kind of CTI:
 ransomware case studies, APT campaign reports, ICS/OT incident write-ups,

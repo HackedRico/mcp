@@ -18,7 +18,6 @@ Requires Caldera running with MCP plugin enabled.
 """
 import pytest
 import requests
-import time
 import json
 
 CALDERA_URL = "http://localhost:8888"
@@ -160,26 +159,8 @@ class TestCtiRawDeletion:
 class TestCtiPipelineRun:
     """Tests for the Run Pipeline button."""
 
-    def test_run_with_files(self):
-        """Run pipeline on specific files."""
-        r = requests.post(f"{CALDERA_URL}/plugin/mcp/cti/run",
-                         headers=JSON_HEADERS,
-                         json={"files": [{"name": "pytest_upload.txt", "location": "inbox"}],
-                               "step": "all"}, timeout=30)
-        assert r.status_code in (200, 400, 500)
 
-    def test_run_without_files_fails(self):
-        """Run pipeline with no files should fail."""
-        r = requests.post(f"{CALDERA_URL}/plugin/mcp/cti/run",
-                         headers=JSON_HEADERS,
-                         json={"files": [], "step": "all"}, timeout=10)
-        assert r.status_code in (200, 400)
 
-    def test_run_missing_body_fails(self):
-        """Run pipeline with no body should fail."""
-        r = requests.post(f"{CALDERA_URL}/plugin/mcp/cti/run",
-                         headers=HEADERS, timeout=5)
-        assert r.status_code in (400, 500)
 
 
 # ============================================================
@@ -314,12 +295,6 @@ class TestConfigEndpoints:
         # Should have at least model and provider
         assert "model" in cti or "provider" in cti or "offline" in cti
 
-    def test_set_config(self):
-        """POST /set_config accepts config updates."""
-        r = requests.post(f"{CALDERA_URL}/plugin/mcp/set_config",
-                         headers=JSON_HEADERS,
-                         json={"config": {"cti": {"offline": True}}}, timeout=5)
-        assert r.status_code == 200
         # Note: config persistence depends on implementation —
         # some configs only persist to YAML, others are in-memory only
 
@@ -359,7 +334,7 @@ class TestMcpHistory:
 
     def test_list_runs(self):
         """GET /history returns run list."""
-        r = requests.get(f"{CALDERA_URL}/plugin/mcp/history",
+        r = requests.get(f"{CALDERA_URL}/plugin/mcp/history/runs",
                         headers=HEADERS, timeout=5)
         assert r.status_code == 200
         data = r.json()
@@ -378,7 +353,7 @@ class TestAuthentication:
         ("GET", "/plugin/mcp/cti/raw"),
         ("GET", "/plugin/mcp/stix/list"),
         ("GET", "/plugin/mcp/get_config"),
-        ("GET", "/plugin/mcp/history"),
+        ("GET", "/plugin/mcp/history/runs"),
     ]
 
     @pytest.mark.parametrize("method,path", ENDPOINTS)

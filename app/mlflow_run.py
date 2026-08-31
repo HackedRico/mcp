@@ -13,10 +13,72 @@ the run it belongs to and no process-wide state is involved.
 """
 
 import logging
+import re
 
 from mlflow.tracking import MlflowClient
 
 log = logging.getLogger("plugins.mcp")
+
+_SECRET_RE = re.compile(r"\bsk-[A-Za-z0-9_-]{8,}\b")
+
+
+def _scrub_secrets(text: str) -> str:
+    return _SECRET_RE.sub("sk-***", str(text or ""))
+
+
+def _leaf_exceptions(exc: BaseException) -> list[BaseException]:
+    if isinstance(exc, BaseExceptionGroup):
+        leaves = []
+        for child in exc.exceptions:
+            leaves.extend(_leaf_exceptions(child))
+        return leaves
+    return [exc]
+
+
+def summarize_exception(exc: BaseException) -> str:
+    """The innermost cause, scrubbed, rather than the group that wraps it.
+
+    An MCP stdio session fails inside nested anyio task groups, so the
+    exception that reaches a caller stringifies as "unhandled errors in a
+    TaskGroup (1 sub-exception)". MLflow params are immutable, so whichever
+    handler logged first won, and that string is what History displayed
+    instead of the provider error that actually stopped the run.
+    """
+    leaves = _leaf_exceptions(exc)
+    if not leaves:
+        return _scrub_secrets(str(exc))
+    primary = leaves[-1]
+    summary = _scrub_secrets(str(primary)).strip() or primary.__class__.__name__
+    if "failure to get a peer from the ring-balancer" in summary:
+        return (
+            "LLM provider unavailable: the AI Platform model gateway returned "
+            "'failure to get a peer from the ring-balancer' after retries."
+        )
+    # Providers word this three ways for the same cause, and none of them say
+    # where the name is set.
+    bad_model = re.search(
+        r"[Tt]he model [`'\"]?([\w./:-]+)[`'\"]? (?:does not exist|is not available)",
+        summary,
+    )
+    if bad_model:
+        return (
+            f"Model not available: the provider has no {bad_model.group(1)}. "
+            f"Set a model it serves in Global Model Config, or in llm.model "
+            f"in conf/local.yml."
+        )
+    busy = re.search(r"[`'\"]?([\w./:-]+)[`'\"]? is temporarily at capacity", summary)
+    if busy:
+        return (
+            f"Model busy: the provider has no free slot for {busy.group(1)}. "
+            f"Retry, or pick another model."
+        )
+
+    if "Incorrect API key provided" in summary:
+        return (
+            "LLM authentication failed: the configured API key was rejected by "
+            "the selected provider."
+        )
+    return summary
 
 # mlflow rejects an oversized value outright. Truncating keeps a completed
 # run from being recorded as failed just because its reasoning was long.

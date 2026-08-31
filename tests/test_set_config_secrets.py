@@ -69,23 +69,38 @@ async def test_save_scrubs_a_key_an_earlier_build_wrote(api, tmp_path):
 
 @pytest.mark.asyncio
 async def test_strips_nested_secrets(api, tmp_path):
-    # set_config accepts arbitrary top-level keys, so callers have produced
-    # nested shapes like {"config": {"cti": {...}}}. A one-level scrub
-    # walked straight past those.
+    # get_config hands back {"config": cfg}, so a client editing what it read
+    # posts that envelope back. It is unwrapped, and the scrub still recurses.
     await api.set_config(_FakeRequest({
-        "config": {"cti": {"model": "m", "api_key": "sk-nested"}},
+        "config": {"llm": {"model": "m", "api_key": "sk-nested"}},
     }))
     text = (tmp_path / "conf" / "local.yml").read_text()
     assert "sk-nested" not in text
-    assert _saved(tmp_path)["config"]["cti"] == {"model": "m"}
+    assert _saved(tmp_path)["llm"] == {"model": "m"}
+    assert "config" not in _saved(tmp_path)
 
 
 @pytest.mark.asyncio
-async def test_strips_secrets_inside_lists(api, tmp_path):
-    await api.set_config(_FakeRequest({
-        "llm": {"profiles": [{"name": "a", "api_key": "sk-in-list"}]},
-    }))
-    assert "sk-in-list" not in (tmp_path / "conf" / "local.yml").read_text()
+async def test_envelope_round_trip_does_not_nest(api, tmp_path):
+    # The failure this guards: an enveloped save wrote a `config:` root that
+    # the overlay ignored, so the operator's endpoint silently never loaded.
+    await api.set_config(_FakeRequest({"llm": {"model": "first"}}))
+    await api.set_config(_FakeRequest({"config": {"llm": {"model": "second"}}}))
+    saved = _saved(tmp_path)
+    assert saved["llm"]["model"] == "second"
+    assert "config" not in saved
+
+
+def test_strips_secrets_inside_lists():
+    # The scrub is tested directly here because the endpoint refuses an
+    # unknown key outright, so no payload with a nested list survives to the
+    # file. The recursion still has to hold for anything that does.
+    from plugins.mcp.app.mcp_api import _without_secrets
+
+    cleaned = _without_secrets(
+        {"llm": {"profiles": [{"name": "a", "api_key": "sk-in-list"}]}}
+    )
+    assert cleaned["llm"]["profiles"][0] == {"name": "a"}
 
 
 @pytest.mark.asyncio
@@ -112,3 +127,26 @@ async def test_keeps_the_env_var_indirection(api, tmp_path):
     assert _saved(tmp_path)["llm"] == {
         "api_key_env": "MCP_LLM_API_KEY", "api_base_env": "MCP_LLM_API_BASE",
     }
+
+
+@pytest.mark.asyncio
+async def test_rejects_an_unsupported_provider(api, tmp_path):
+    # llm_client raises "Unsupported model provider" at extraction time, so a
+    # value like "OpenAI" saved cleanly and then failed on every document.
+    resp = await api.set_config(_FakeRequest({"cti": {"provider": "OpenAI"}}))
+    assert resp.status == 400
+    assert not (tmp_path / "conf" / "local.yml").exists()
+
+
+@pytest.mark.asyncio
+async def test_accepts_the_supported_providers(api, tmp_path):
+    for provider in ("openai_compatible", "ollama"):
+        resp = await api.set_config(_FakeRequest({"llm": {"provider": provider}}))
+        assert resp.status == 200
+    assert _saved(tmp_path)["llm"]["provider"] == "ollama"
+
+
+@pytest.mark.asyncio
+async def test_a_section_without_a_provider_is_untouched(api, tmp_path):
+    resp = await api.set_config(_FakeRequest({"llm": {"model": "m"}}))
+    assert resp.status == 200

@@ -7,12 +7,24 @@ import json
 import yaml
 import shutil
 import asyncio
-import subprocess
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
+
+from app.service.auth_svc import for_all_public_methods, check_authorization
 
 from plugins.mcp.app.config import llm_defaults
-from plugins.mcp.app.utilities.llm_client import load_config, reload_config
+from plugins.mcp.app.utilities.llm_client import (
+    LLM_OVERRIDABLE,
+    LLM_PROFILES,
+    WORKLOAD_OVERRIDABLE,
+    deep_merge,
+    layered_profile,
+    load_config,
+    reload_config,
+    resolve_env_indirection,
+    unwrap_config_envelope,
+)
+from plugins.mcp.app.utilities.cti_raw_cleaner import clean_stem
 from plugins.mcp.app.utilities.paths import get_mcp_data_dir, get_mcp_root
 from plugins.mcp.app.cti_ingest_svc import CTIIngestService
 
@@ -20,8 +32,11 @@ from plugins.mcp.app.cti_ingest_svc import CTIIngestService
 # come back from llm_defaults() which already applies its own fallbacks;
 # the RAG-specific defaults stay here because they belong to the capability
 # rather than the LLM provider.
+#
+# rag_embed_model has no literal default: an undeclared embedding model falls
+# back to the configured chat model, since a deployment pointing at its own
+# gateway has no reason to reach for an OpenAI model name it never chose.
 _RAG_DEFAULTS = {
-    "rag_embed_model": "openai/text-embedding-3-small",
     "rag_topk": 5,
 }
 
@@ -30,7 +45,36 @@ _RAG_DEFAULTS = {
 # Matched by name rather than listed: the UI keeps growing key fields
 # (embed_api_key, plan_api_key, cti_rag_api_key) and a list keeps missing them.
 # api_key_env names a variable, not a value, so it is kept.
-_SECRET_KEY_NAME = re.compile(r"api_?key", re.IGNORECASE)
+# Widened past api_key: a gateway credential also arrives as an Authorization
+# or x-api-key header, and the llm section used to accept any key at all, so
+# all three reached the file in plaintext.
+# max_tokens contains "token" and is a generation setting, not a credential,
+# so the token alternative excludes it explicitly. Dropping it silently is
+# worse than not matching a credential, because the operator sees a saved
+# value vanish with no error.
+_SECRET_KEY_NAME = re.compile(
+    r"(api[-_]?key|authorization|bearer|(?<!max_)token"
+    r"|secret|password|passwd|credential)",
+    re.IGNORECASE,
+)
+
+# The only top-level sections conf/local.yml has meaning for. An unknown one
+# is either a typo or an attempt to write something nothing reads.
+_KNOWN_SECTIONS = LLM_PROFILES | {"caldera", "mlflow"}
+
+# The non-LLM sections, which the profile allowlists do not cover.
+_SECTION_OVERRIDABLE = {
+    "mlflow": frozenset({"host", "port"}),
+    "caldera": frozenset({"url_env", "api_key_env"}),
+}
+
+# hook.py passes mlflow.host straight to "mlflow server --host", and that
+# server holds every prompt and response the plugin has logged, unauthenticated.
+# Rebinding it off loopback is a deployment decision, not a UI one.
+_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
+
+# Mirrors the dispatch in llm_client.LLMClient.generate.
+_VALID_PROVIDERS = {"openai_compatible", "ollama"}
 
 
 def _is_secret(name) -> bool:
@@ -45,10 +89,23 @@ def _without_secrets(value):
         return [_without_secrets(v) for v in value]
     return value
 
+# Caldera gates plugin routes per handler, not with a middleware: auth_svc.apply
+# only installs the session and security machinery, and check_authorization is
+# what calls check_permissions. Without this every route here was reachable
+# unauthenticated, including the ones that delete files and rewrite local.yml.
+# McpGUI in this same plugin already carries it, as do access, gameboard and
+# human. Every public method on this class is a registered route.
+@for_all_public_methods(check_authorization)
 class McpAPI:
 
     def __init__(self, services):
         self.services = services
+        # check_authorization reaches for self.auth_svc on the instance.
+        self.auth_svc = services.get("auth_svc")
+        # Outcome of the most recent CTI run. cti_run returns as soon as the
+        # work is scheduled, so this is the only thing the browser can poll to
+        # learn that a run failed.
+        self._cti_run = {"state": "idle", "step": None, "files": [], "error": None}
         self.mcp_svc = services.get("mcp_svc")
         self.log = logging.getLogger("plugins.mcp")
         self.log.info("[MCP] Initialized McpAPI")
@@ -222,10 +279,12 @@ class McpAPI:
                 "fields_locked": cfg.get("fields_locked") or {},
             }
             for key, fallback in _RAG_DEFAULTS.items():
-                if key == "rag_embed_model":
-                    payload[key] = cfg.get(key) or cfg.get("embed_model") or fallback
-                else:
-                    payload[key] = cfg.get(key, fallback)
+                payload[key] = cfg.get(key, fallback)
+            payload["rag_embed_model"] = (
+                cfg.get("rag_embed_model")
+                or cfg.get("embed_model")
+                or cfg.get("model")
+            )
             return web.json_response(payload)
         except Exception as e:
             self.log.error(f"[MCP] Error fetching defaults: {e}")
@@ -328,7 +387,7 @@ class McpAPI:
 
             target_path = base_dir / filename
             if target_path.exists():
-                ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+                ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
                 stem = Path(filename).stem
                 suffix = Path(filename).suffix
                 filename = f"{stem}_{ts}{suffix}"
@@ -366,7 +425,7 @@ class McpAPI:
                         files.append({
                             "filename": p.name,
                             "size": stat.st_size,
-                            "modified": datetime.utcfromtimestamp(stat.st_mtime).isoformat() + "Z"
+                            "modified": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat().replace("+00:00", "Z")
                         })
                     except Exception:
                         continue
@@ -486,13 +545,37 @@ class McpAPI:
     # CTI vue
     async def cti_run(self, request):
         try:
-            data = await request.json()
+            try:
+                data = await request.json()
+            except Exception:
+                return web.json_response(
+                    {"error": "Body must be JSON"}, status=400
+                )
+            if not isinstance(data, dict):
+                return web.json_response(
+                    {"error": "Body must be a JSON object"}, status=400
+                )
+
             files = data.get("files")
             step = data.get("step", "all")
 
             if not files or not isinstance(files, list):
                 return web.json_response(
                     {"error": "Missing files list"},
+                    status=400
+                )
+            # Every name is joined onto a Path below, so a non-string element
+            # raises TypeError and surfaces as a 500. The upload handlers pass
+            # their filenames through basename; this one never did, so a name
+            # with a separator escaped the uploads directory.
+            if not all(isinstance(f, str) and f.strip() for f in files):
+                return web.json_response(
+                    {"error": "files must be a list of non-empty strings"},
+                    status=400
+                )
+            if any(f != os.path.basename(f) for f in files):
+                return web.json_response(
+                    {"error": "files must be bare filenames"},
                     status=400
                 )
 
@@ -503,7 +586,10 @@ class McpAPI:
             processed.mkdir(parents=True, exist_ok=True)
 
             # 1️⃣ Rehydrate selected items (for re-runs)
-            svc = CTIIngestService()
+            # The selection has to reach the service: clean/ accumulates, so
+            # without it Stage 1 re-extracts every report ever ingested while
+            # the browser reports the count the operator picked.
+            svc = CTIIngestService(selected=files)
 
             uploads_dir = self.base_dir / "raw" / "uploads"
             processed_dir = self.base_dir / "raw" / "processed"
@@ -520,12 +606,43 @@ class McpAPI:
 
             # 2️⃣ Run pipeline (NON-BLOCKING)
             loop = asyncio.get_running_loop()
-            loop.run_in_executor(
+            future = loop.run_in_executor(
                 None,
                 svc.run_stage,
                 self.base_dir,
                 step
             )
+
+            self._cti_run = {
+                "state": "running", "step": step, "files": files, "error": None,
+            }
+
+            # run_stage re-raises after marking FAILED. Without retrieving the
+            # result the exception dies with the future, so a run that failed
+            # immediately looked identical to one still working: no log line,
+            # and the file stuck on "pending" forever. The outcome is recorded
+            # here too, because the service instance is local to this request
+            # and the browser has nothing else to poll.
+            def _report(fut):
+                exc = fut.exception()
+                if exc is None:
+                    self._cti_run = {
+                        "state": "complete", "step": step, "files": files,
+                        "error": None,
+                    }
+                    self.log.info(f"[MCP] CTI pipeline finished: step={step}")
+                else:
+                    self._cti_run = {
+                        "state": "failed", "step": step, "files": files,
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
+                    self.log.error(
+                        f"[MCP] CTI pipeline failed: step={step} files={files}",
+                        exc_info=exc,
+                    )
+
+            future.add_done_callback(_report)
+            self.log.info(f"[MCP] CTI pipeline started: step={step} files={files}")
 
             return web.json_response({
                 "status": "started",
@@ -552,11 +669,14 @@ class McpAPI:
 
             self.base_dir.mkdir(parents=True, exist_ok=True)
 
-            rag_dir = self.base_dir / "stix_cti"
+            # Same directory the four read handlers and the pipeline use.
+            # Uploading to stix_cti made every bundle invisible to list,
+            # get, download and delete.
+            rag_dir = self.base_dir / "outputs_stix"
             rag_dir.mkdir(parents=True, exist_ok=True)
             target_path = rag_dir / filename
             if target_path.exists():
-                ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+                ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
                 target_path = rag_dir / f"{target_path.stem}_{ts}.json"
 
             data = await part.read()
@@ -585,15 +705,16 @@ class McpAPI:
                 for p in stix_dir.glob("*.json"):
                     stat = p.stat()
 
-                    # ⬇️ READ BUNDLE METADATA SAFELY
                     model = None
                     provider = None
+                    extractor = None
 
                     try:
                         with p.open("r", encoding="utf-8") as f:
                             bundle = json.load(f)
                             model = bundle.get("x_cti_model")
                             provider = bundle.get("x_cti_provider")
+                            extractor = (bundle.get("x_cti_config") or {}).get("extractor")
                     except Exception:
                         # Do NOT fail listing if one file is malformed
                         pass
@@ -601,9 +722,11 @@ class McpAPI:
                     files.append({
                         "filename": p.name,
                         "size": stat.st_size,
-                        "modified": datetime.utcfromtimestamp(stat.st_mtime).isoformat() + "Z",
+                        "modified": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat().replace("+00:00", "Z"),
+                        # Absent on an offline bundle, which credits no model.
                         "model": model,
                         "provider": provider,
+                        "extractor": extractor,
                     })
 
             self.log.info(f"[MCP] listing stix cti files: {files}")
@@ -615,20 +738,49 @@ class McpAPI:
             return web.json_response({"error": str(e)}, status=500)
 
     async def delete_stix_cti(self, request):
-        data = await request.json()
-        files = data.get("files", [])
-        stix_dir = self.base_dir /"outputs_stix"
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response({"error": "Body must be JSON"}, status=400)
+
+        files = (data or {}).get("files", [])
+        if not isinstance(files, list) or not all(isinstance(f, str) for f in files):
+            return web.json_response(
+                {"error": "files must be a list of strings"}, status=400
+            )
+
+        stix_dir = self.base_dir / "outputs_stix"
+        stix_root = stix_dir.resolve()
+        deleted = []
 
         for fname in files:
-            p = stix_dir / fname
-            if p.exists() and p.is_file():
-                p.unlink()
+            # This used to join the name and unlink whatever existed, so any
+            # path resolving to a file was deletable. download_stix_cti twelve
+            # lines below already had the right guard.
+            target = (stix_dir / fname).resolve()
+            if stix_root not in target.parents:
+                continue
+            try:
+                if target.is_file():
+                    target.unlink()
+                    deleted.append(fname)
+            except OSError as e:
+                self.log.error(f"[MCP] could not delete {fname}: {e}")
 
-        return web.json_response({"deleted": files})
+        # Report what actually went, not what was asked for.
+        return web.json_response({"deleted": deleted})
 
     async def upload_cti_raw(self, request):
         try:
-            reader = await request.multipart()
+            # multipart() raises KeyError('Content-Type') rather than a 4xx
+            # when the header is absent, which reached the client as a 500.
+            try:
+                reader = await request.multipart()
+            except Exception:
+                return web.json_response(
+                    {"error": "Expected a multipart/form-data upload"},
+                    status=400
+                )
             file_part = None
             async for part in reader:
                 if part.name == "file":
@@ -652,16 +804,10 @@ class McpAPI:
 
             self.log.info(f"[MCP] Uploaded CTI input: {input_path}")
 
-            # 2️⃣ Kick off pipeline (Stage 1 + 2)
-            # subprocess.Popen(
-            #     ["python", "app/cti_ingest_svc.py", "--base-dir", "data"],
-            #     stdout=subprocess.DEVNULL,
-            #     stderr=subprocess.DEVNULL,
-            # )
-            print(" starting cti ingest subprocess ")
-
+            # Staging only. Extraction runs from the Run Pipeline button,
+            # which posts to /plugin/mcp/cti/run.
             return web.json_response({
-                "status": "CTI ingest started",
+                "status": "staged",
                 "file": filename
             })
 
@@ -679,7 +825,13 @@ class McpAPI:
             seen = set()
 
             def file_status(p: Path) -> str:
-                ir_path = ir_complete / f"{p.stem}.json"
+                """Processed means an IR exists and is no older than the file.
+
+                The listing used to stamp a literal "processed" on everything
+                in that directory, so a report that was never selected, never
+                cleaned and never extracted still rendered green.
+                """
+                ir_path = ir_complete / f"{clean_stem(p.name)}.json"
                 if not ir_path.exists():
                     return "pending"
                 return (
@@ -688,7 +840,7 @@ class McpAPI:
                     else "pending"
                 )
 
-            def collect(dir_path: Path, status_for_files: str | None):
+            def collect(dir_path: Path):
                 out = []
                 if not dir_path.exists():
                     return out
@@ -706,7 +858,7 @@ class McpAPI:
                                 "name": c.name,
                                 "size": c.stat().st_size,
                                 "type": "file",
-                                "status": status_for_files,
+                                "status": file_status(c),
                             })
                         out.append({
                             "name": p.name,
@@ -719,18 +871,22 @@ class McpAPI:
                     # -------------------------
                     # FILE
                     # -------------------------
+                    if p.name in seen:
+                        continue
+                    seen.add(p.name)
                     out.append({
                         "name": p.name,
                         "type": "file",
                         "size": p.stat().st_size,
-                        "status": status_for_files,
+                        # Computed, not assumed from which directory it sits in.
+                        "status": file_status(p),
                     })
 
                 return out
 
             # uploads first, processed second (UI expectation)
-            items.extend(collect(uploads_dir, "pending"))
-            items.extend(collect(processed_dir, "processed"))
+            items.extend(collect(uploads_dir))
+            items.extend(collect(processed_dir))
 
             return web.json_response({"items": items})
 
@@ -752,11 +908,16 @@ class McpAPI:
             deleted = []
 
             def try_delete(base: Path, name: str) -> bool:
+                if not isinstance(name, str) or not name.strip():
+                    return False
+
                 target = (base / name).resolve()
                 base_resolved = base.resolve()
 
-                # hard safety: no traversal
-                if base_resolved not in target.parents and target != base_resolved:
+                # Containment. The base directory itself was previously
+                # admitted, so an empty name resolved to it and the rmtree
+                # below removed the whole uploads or processed directory.
+                if base_resolved not in target.parents:
                     return False
 
                 if target.exists():
@@ -806,11 +967,111 @@ class McpAPI:
         except Exception as e:
             return web.json_response({"error": str(e)}, status=500)
 
+    async def cti_status(self, request):
+        """Outcome of the most recent CTI run.
+
+        cti_run schedules the work and returns immediately, so without this
+        a failure only ever reached the server log and the row in the UI
+        stayed on 'pending' indefinitely.
+        """
+        return web.json_response(self._cti_run)
+
+    async def view_cti_raw(self, request):
+        """Return an uploaded report as text for the preview modal.
+
+        A PDF is not readable as-is, so the extracted text from data/clean is
+        preferred when the pipeline has already produced it, and pdftotext runs
+        on demand otherwise. That keeps a pending PDF viewable without making
+        the operator run the pipeline just to see what they uploaded.
+        """
+        try:
+            try:
+                data = await request.json()
+            except Exception:
+                return web.json_response({"error": "Body must be JSON"}, status=400)
+
+            filename = (data or {}).get("filename")
+            if not filename or not isinstance(filename, str):
+                return web.json_response({"error": "Missing filename"}, status=400)
+
+            # A nested upload is addressed as "<dir>/<name>", so basename is
+            # too strict here. resolve() collapses any .. before the parents
+            # check, which is what actually contains the read to the root.
+            uploads = self.base_dir / "raw" / "uploads"
+            processed = self.base_dir / "raw" / "processed"
+            target = None
+            for root in (uploads, processed):
+                candidate = (root / filename).resolve()
+                if root.resolve() in candidate.parents and candidate.is_file():
+                    target = candidate
+                    break
+            if target is None:
+                return web.json_response({"error": "File not found"}, status=404)
+
+            suffix = target.suffix.lower()
+            if suffix == ".pdf":
+                clean = self.base_dir / "clean" / f"{clean_stem(target.name)}.txt"
+                if clean.is_file():
+                    text = clean.read_text(encoding="utf-8", errors="replace")
+                else:
+                    # Same missing-poppler case the cleaner handles: name the
+                    # dependency rather than letting FileNotFoundError read as
+                    # the report being absent.
+                    try:
+                        proc = await asyncio.create_subprocess_exec(
+                            "pdftotext", "-layout", str(target), "-",
+                            stdout=asyncio.subprocess.PIPE,
+                            stderr=asyncio.subprocess.PIPE,
+                        )
+                    except FileNotFoundError:
+                        return web.json_response(
+                            {"error": "pdftotext not found. Install poppler to "
+                                      "preview PDF reports."},
+                            status=501,
+                        )
+                    out, err = await proc.communicate()
+                    if proc.returncode != 0:
+                        return web.json_response(
+                            {"error": f"Could not read PDF: {err.decode()[:200]}"},
+                            status=500,
+                        )
+                    text = out.decode("utf-8", errors="replace")
+            else:
+                text = target.read_text(encoding="utf-8", errors="replace")
+
+            return web.json_response({
+                "filename": filename,
+                "kind": suffix.lstrip("."),
+                "size": target.stat().st_size,
+                "text": text,
+            })
+
+        except Exception as e:
+            self.log.error(f"[MCP] view_cti_raw failed: {e}")
+            return web.json_response({"error": str(e)}, status=500)
+
     async def get_config(self, request):
         try:
             cfg = load_config()
+
+            # The panel used to layer the profiles itself, in JavaScript, over
+            # this raw yaml. It duplicated the allowlist and skipped env
+            # resolution, so it displayed "not set" for an endpoint that came
+            # from MCP_LLM_API_BASE while extraction dialled it correctly.
+            # Resolve it here, where the rule already lives.
+            resolved = {}
+            # Every LLM profile, declared or not: an absent workload profile
+            # inherits the connection, and the panel has to show that.
+            for profile in sorted(LLM_PROFILES):
+                resolved[profile] = _without_secrets(
+                    resolve_env_indirection(layered_profile(cfg, profile))
+                )
+
             self.log.info("[MCP] get_config returning effective config")
-            return web.json_response({"config": cfg})
+            return web.json_response({
+                "config": _without_secrets(cfg),
+                "resolved": resolved,
+            })
         except Exception as e:
             self.log.error(f"[MCP] get_config failed: {e}")
             return web.json_response({"error": str(e)}, status=500)
@@ -828,6 +1089,98 @@ class McpAPI:
                     status=400
                 )
 
+            payload = unwrap_config_envelope(data)
+
+            # llm_client dispatches on an exact provider string and raises
+            # "Unsupported model provider" otherwise. Catching it here names
+            # the field while the operator is still looking at it, rather
+            # than failing on every document at extraction time.
+            invalid = [
+                f"{section}.provider={cfg['provider']!r}"
+                for section, cfg in payload.items()
+                if isinstance(cfg, dict) and cfg.get("provider")
+                and cfg["provider"] not in _VALID_PROVIDERS
+            ]
+            if invalid:
+                return web.json_response({
+                    "error": f"unsupported provider: {', '.join(invalid)}. "
+                             f"Valid: {', '.join(sorted(_VALID_PROVIDERS))}"
+                }, status=400)
+
+            unknown = sorted(set(payload) - _KNOWN_SECTIONS)
+            if unknown:
+                return web.json_response({
+                    "error": f"unknown config section: {', '.join(unknown)}. "
+                             f"Valid: {', '.join(sorted(_KNOWN_SECTIONS))}."
+                }, status=400)
+
+            # The reader drops any connection key on a workload profile, so
+            # accepting one here and answering "saved" persists a setting that
+            # will never be read. Refuse it while the operator is still looking
+            # at the field, and name the profile that does own it. The llm
+            # profile has its own allowlist: it used to take any key, so an
+            # Authorization header or an mlflow host landed in the file.
+            def _allowed(section):
+                if section in _SECTION_OVERRIDABLE:
+                    return _SECTION_OVERRIDABLE[section]
+                return LLM_OVERRIDABLE if section == "llm" else WORKLOAD_OVERRIDABLE
+
+            # A credential-named key is stripped by _without_secrets below
+            # rather than refused, so an older cached bundle that still posts
+            # api_key can save the rest of its payload instead of failing
+            # outright. Everything else outside the allowlist is a structural
+            # mistake worth naming.
+            misplaced = [
+                f"{section}.{key}"
+                for section, cfg in payload.items()
+                if isinstance(cfg, dict)
+                for key in sorted(cfg)
+                if key not in _allowed(section) and not _is_secret(key)
+            ]
+            if misplaced:
+                return web.json_response({
+                    "error": f"not settable here: {', '.join(misplaced)}. "
+                             f"The connection belongs to 'llm'; a workload "
+                             f"profile may set "
+                             f"{', '.join(sorted(WORKLOAD_OVERRIDABLE))}. "
+                             f"Credentials belong in plugins/mcp/.env."
+                }, status=400)
+
+            bind = (payload.get("mlflow") or {}).get("host")
+            if bind is not None and str(bind) not in _LOOPBACK_HOSTS:
+                return web.json_response({
+                    "error": f"mlflow.host {bind!r} would expose the tracking "
+                             f"server, which holds every logged prompt and "
+                             f"response, on a non-loopback interface. Edit "
+                             f"conf/local.yml directly if that is intended."
+                }, status=400)
+
+            # fields_locked is the lock itself. Writable, it unlocks itself,
+            # so it is editable only by hand in conf/local.yml.
+            locked_write = [
+                section for section, cfg in payload.items()
+                if isinstance(cfg, dict) and "fields_locked" in cfg
+            ]
+            if locked_write:
+                return web.json_response({
+                    "error": "fields_locked cannot be set over the API; "
+                             "edit conf/local.yml directly."
+                }, status=400)
+
+            # Honour the lock this endpoint used to ignore entirely.
+            effective = load_config()
+            blocked = [
+                f"{section}.{key}"
+                for section, cfg in payload.items()
+                if isinstance(cfg, dict)
+                for key in sorted(cfg)
+                if ((effective.get(section) or {}).get("fields_locked") or {}).get(key)
+            ]
+            if blocked:
+                return web.json_response({
+                    "error": f"locked by conf/local.yml: {', '.join(blocked)}"
+                }, status=400)
+
             conf_dir = self.root_dir / "conf"
             conf_dir.mkdir(exist_ok=True)
 
@@ -836,15 +1189,26 @@ class McpAPI:
             # 1️⃣ Load existing local.yml if present
             if local_path.exists():
                 with local_path.open("r", encoding="utf-8") as f:
-                    existing = yaml.safe_load(f) or {}
+                    existing = unwrap_config_envelope(yaml.safe_load(f) or {})
             else:
                 existing = {}
 
-            # 2️⃣ Update only provided top-level keys
+            # 2️⃣ Merge the provided keys into each section.
             # Example payload: { "cti": {...} } or { "llm": {...} }
-            for section, cfg in data.items():
+            # get_config hands back {"config": cfg}, so a client that edits
+            # what it read posts that envelope straight back.
+            #
+            # This assigned the section outright, so a partial payload erased
+            # every key it did not mention. The CTI panel posts four keys, so
+            # one Save deleted a hand-pinned model, api_base or ssl_verify.
+            # Removing a key is still a file edit; a POST only ever adds or
+            # updates.
+            for section, cfg in payload.items():
                 if isinstance(cfg, dict):
-                    existing[section] = cfg
+                    current = existing.get(section)
+                    existing[section] = (
+                        deep_merge(current, cfg) if isinstance(current, dict) else cfg
+                    )
 
             # 3️⃣ Scrub secrets from the whole file, not just the posted
             # sections, so a save also clears a key an earlier build wrote.
@@ -864,59 +1228,6 @@ class McpAPI:
 
         except Exception as e:
             self.log.error(f"[MCP] Failed to save config: {e}")
-            return web.json_response({"error": str(e)}, status=500)
-
-    # ===== AE end-to-end workflow runner =====
-
-    async def run_ae_end_to_end(self, request):
-        """POST /plugin/mcp/workflows/run-ae-end-to-end.
-
-        Invokes the in-process ``ae-e2e`` workflow directly (bypassing the
-        DSPy / LM pipeline used by /plugin/mcp/execute). Runs every stage to
-        completion in the request handler and returns the final state dict so
-        callers can show stage statuses without polling /status.
-
-        Request body (all optional except cti_source for fresh runs):
-            {
-              "cti_source": "raw/uploads/report.pdf",
-              "dry_run": false,
-              "start_stage": "cti",
-              "only_stage": null,
-              "checkpoint_path": "/tmp/e2e_full_vision_state.json",
-              "elk_url": "http://192.168.66.1:9200",
-              "kibana_url": "http://192.168.66.1:5601",
-              "adversary_slug": "alphv_blackcat",
-              "agents_timeout": 600,
-              "operation_timeout": 1800,
-              "cti_timeout": 900
-            }
-        """
-        try:
-            data = await request.json() if request.body_exists else {}
-        except Exception as e:
-            return web.json_response(
-                {"error": f"invalid JSON body: {e}"}, status=400,
-            )
-        if not isinstance(data, dict):
-            return web.json_response(
-                {"error": "request body must be a JSON object"}, status=400,
-            )
-
-        # ae-e2e is intentionally not registered in the workflow registry —
-        # it duplicates plan_execute's card in the UI. The endpoint bypasses
-        # the registry and instantiates AEEndToEndWorkflow directly with our
-        # services dict (workflow.run requires it).
-        try:
-            from plugins.mcp.app.workflows.ae_e2e import AEEndToEndWorkflow
-            workflow = AEEndToEndWorkflow(self.services)
-            result = await workflow.run(**data)
-            return web.json_response(result)
-        except TypeError as e:
-            return web.json_response(
-                {"error": f"bad workflow arguments: {e}"}, status=400,
-            )
-        except Exception as e:
-            self.log.exception("[MCP] ae-e2e workflow failed")
             return web.json_response({"error": str(e)}, status=500)
 
     async def download_stix_cti(self, request):

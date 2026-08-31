@@ -1,9 +1,8 @@
 """cti_pipeline MCP server.
 
-Exposes the deterministic CTI -> STIX
--> operation -> detections pipeline as MCP tools so plan_execute (and any
-other DSPy ReAct workflow) can drive the same artefacts via tool calls
-instead of a parallel hard-coded workflow.
+Exposes the deterministic CTI -> STIX -> operation pipeline as MCP tools
+so plan_execute (and any other DSPy ReAct workflow) can drive the same
+artefacts via tool calls instead of a parallel hard-coded workflow.
 
 Every tool is a thin async wrapper around an already-existing service or
 utility in this plugin (or a Caldera REST endpoint for cross-plugin
@@ -28,9 +27,8 @@ import json
 import logging
 import os
 import sys
-import uuid
 from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
 
 # This file runs both in-process (when the workflow registry imports it
 # to enumerate tools) and as a stdio subprocess spawned by plan_execute's
@@ -114,8 +112,7 @@ MCP_METADATA = {
     "default_enabled": False,
     "description": (
         "End-to-end CTI ingest tools: PDF/HTML -> STIX 2.1 bundle -> "
-        "adversary -> operation "
-        "-> detection validation. Thin wrappers over the deterministic "
+        "adversary -> operation. Thin wrappers over the deterministic "
         "pipeline services."
     ),
 }
@@ -148,36 +145,6 @@ def _caldera_headers() -> dict:
     }
 
 
-def _caldera_root() -> str:
-    """Caldera HTTP root (without the /api/v2/ suffix) - used for plugin
-    endpoints that live outside the v2 API namespace.
-    """
-    api = _caldera_base_url()
-    # api looks like "http://host:port/api/v2/"; strip the trailing
-    # "api/v2/" to get the root.
-    for marker in ("api/v2/", "api/v2"):
-        if api.endswith(marker):
-            return api[: -len(marker)]
-    # Fallback - use the scheme+host only.
-    return api
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 # ---------------------------------------------------------------------------
@@ -199,8 +166,7 @@ async def ingest_cti(file_path: str) -> dict:
 
     Returns:
         {stix_path, counts} where counts breaks down the bundle by SDO
-        type (malware, infrastructure, identities, attack_patterns, tools,
-        relationships, user_accounts).
+        type (attack_patterns, threat_actors).
     """
     from plugins.mcp.app.cti_ingest_svc import CTIIngestService
     from plugins.mcp.app.utilities.paths import get_mcp_data_dir
@@ -253,39 +219,18 @@ async def ingest_cti(file_path: str) -> dict:
                 break
 
     counts = {
-        "malware": 0,
-        "infrastructure": 0,
-        "user_accounts": 0,
-        "identities": 0,
         "attack_patterns": 0,
-        "tools": 0,
-        "relationships": 0,
         "threat_actors": 0,
-        "intrusion_sets": 0,
     }
     if stix_path and stix_path.is_file():
         try:
             bundle = json.loads(stix_path.read_text(encoding="utf-8"))
             for obj in bundle.get("objects", []):
                 t = obj.get("type", "")
-                if t == "malware":
-                    counts["malware"] += 1
-                elif t == "infrastructure":
-                    counts["infrastructure"] += 1
-                elif t == "identity":
-                    counts["identities"] += 1
-                elif t == "user-account":
-                    counts["user_accounts"] += 1
-                elif t == "attack-pattern":
+                if t == "attack-pattern":
                     counts["attack_patterns"] += 1
-                elif t == "tool":
-                    counts["tools"] += 1
-                elif t == "relationship":
-                    counts["relationships"] += 1
                 elif t == "threat-actor":
                     counts["threat_actors"] += 1
-                elif t == "intrusion-set":
-                    counts["intrusion_sets"] += 1
         except Exception as e:
             log.warning(f"counts assembly failed: {e}")
 
@@ -348,77 +293,227 @@ async def fuse_cti_bundles(stix_paths: list[str]) -> dict:
     }
 
 
-@mcp.tool(name="cti_pipeline_build_source")
+def _bundle_technique_ids(bundle: dict) -> list[str]:
+    """ATT&CK ids from a bundle's attack-patterns, keyed on external_references.
+
+    STIX object ids regenerate every run, so external_id is the only stable key.
+    """
+    out = []
+    if not isinstance(bundle, dict):
+        return out
+    for o in bundle.get("objects", []) or []:
+        if not isinstance(o, dict) or o.get("type") != "attack-pattern":
+            continue
+        for ref in o.get("external_references", []) or []:
+            if (ref.get("source_name") or "").lower() != "mitre-attack":
+                continue
+            eid = (ref.get("external_id") or "").strip()
+            if eid.startswith("T"):
+                out.append(eid)
+    return sorted(set(out))
+
+
+def _bundle_actor_name(bundle: dict) -> Optional[str]:
+    if not isinstance(bundle, dict):
+        return None
+    for o in bundle.get("objects", []) or []:
+        if not isinstance(o, dict):
+            continue
+        if o.get("type") in ("threat-actor", "intrusion-set") and o.get("name"):
+            return str(o["name"])
+    return None
+
+
+# atomic_ordering is executed top to bottom, so an unordered list encrypts the
+# estate before it persists on it. Rank by the ability's ATT&CK technique
+# rather than its CALDERA tactic: CALDERA's vocabulary is its own, and its
+# three most common values (multiple, stealth, defense-impairment) have no
+# ATT&CK counterpart, so 43 percent of the stockpile would tie for last.
+# The sequence comes from the bundle's x-mitre-matrix, so it tracks whatever
+# ATT&CK version is installed rather than a copy that silently goes stale.
+
+
+def _technique_rank(technique_id: str, taxonomy: dict) -> int:
+    """Earliest kill-chain phase this technique belongs to.
+
+    A technique can span phases (T1547.001 is persistence and
+    privilege-escalation); the earliest is the one that has to run first.
+    """
+    kill_chain = taxonomy.get("kill_chain_order") or ()
+    entry = (taxonomy.get("attack_id_index") or {}).get((technique_id or "").strip())
+    if not entry:
+        parent = (technique_id or "").split(".")[0]
+        entry = (taxonomy.get("attack_id_index") or {}).get(parent)
+    ranks = [
+        kill_chain.index(p["phase_name"])
+        for p in (entry or {}).get("kill_chain_phases") or []
+        if p.get("kill_chain_name") == "mitre-attack"
+        and p.get("phase_name") in kill_chain
+    ]
+    return min(ranks) if ranks else len(kill_chain)
+
+
+def _technique_matches(report_id: str, ability_id: str) -> bool:
+    """A report naming T1059 should reach T1059.001 abilities and vice versa.
+
+    Reports and the stockpile disagree on granularity often enough that an
+    exact match alone understates the coverage the operator has. Only
+    parent-to-child counts: T1059.001 and T1059.003 are siblings, and
+    treating them as equivalent would run the wrong technique.
+    """
+    if report_id == ability_id:
+        return True
+    return (report_id == ability_id.split(".")[0]
+            or ability_id == report_id.split(".")[0])
+
+
+@mcp.tool(name="cti_pipeline_build_adversary")
 @_stdout_safe
-async def build_source(stix_path: str, source_name: Optional[str] = None,
-                       commit: bool = False) -> dict:
-    """Turn a STIX bundle into a CALDERA fact source.
+async def build_adversary(stix_path: str, platforms: Optional[list] = None,
+                          name: Optional[str] = None, commit: bool = False,
+                          max_per_technique: int = 3) -> dict:
+    """Build a CALDERA adversary from the techniques in a STIX bundle.
 
-    Seeds an operation with the hosts, accounts and domains the report
-    actually named, so a run is grounded in the CTI instead of using
-    placeholder values. Nothing is invented; a bundle that names none of
-    these yields no facts.
-
-    Previews by default. remote.host.ip is a live target (stockpile nmaps and
-    SMB-mounts it) and a report names the attacker's C2 and other victims
-    beside the estate, so review the facts before committing.
+    Maps each ATT&CK technique in the bundle to the abilities that implement
+    it, scoped to the platforms your agents actually run. Reports what it
+    could not cover instead of silently dropping it.
 
     Args:
         stix_path: path to a stage 2 STIX bundle.
-        source_name: name for the created source. Defaults to the bundle stem.
-        commit: create the source. Leave false to preview the facts.
+        platforms: platforms to scope abilities to (e.g. ["windows"]).
+            Defaults to the platforms of agents that have checked in.
+        name: adversary name. Defaults to the bundle's threat actor,
+            then the file stem.
+        commit: create the adversary. Leave false to preview.
+        max_per_technique: abilities to keep per technique. A single
+            technique can have 90+ implementations across the atomic
+            plugin, which makes an adversary that runs for hours. Raise it
+            for breadth; ability_count_available reports what was capped.
 
     Returns:
-        {facts, fact_count, routable_addresses, committed, source_id, name}
+        {name, matched, unmatched_techniques, platform_excluded,
+         technique_count, ability_count, ability_count_available,
+         committed, adversary_id}
+        matched              - ability ids that will run
+        unmatched_techniques - technique ids with no ability at all
+        platform_excluded    - an ability exists but no live agent can run it
     """
-    from plugins.mcp.app.utilities.cti_caldera_facts import (
-        bundle_to_facts,
-        routable_addresses,
-    )
-
     if not stix_path:
         return {"error": "stix_path is required"}
-
-    p = _resolve_pipeline_file(
-        stix_path, data_subdirs=("outputs_stix", "stix_cti", "raw/uploads"),
-    )
+    p = _resolve_pipeline_file(stix_path, data_subdirs=("outputs_stix", "stix_cti"))
     if not p.is_file():
-        return {"error": f"stix_path not found: {stix_path}"}
+        return {"error": f"stix bundle not found: {stix_path}"}
+
     try:
         bundle = json.loads(p.read_text(encoding="utf-8"))
     except Exception as e:
-        return {"error": f"failed to parse STIX bundle: {e}"}
+        return {"error": f"could not read {p}: {e}"}
 
-    facts = bundle_to_facts(bundle)
-    if not facts:
-        return {
-            "error": "bundle named no hosts, accounts or domains",
-            "stix_path": str(p),
-            "fact_count": 0,
-        }
-
-    name = (source_name or "").strip() or f"cti-{p.stem}"
-    routable = routable_addresses(facts)
-
-    if not commit:
-        return {
-            "committed": False,
-            "name": name,
-            "fact_count": len(facts),
-            "facts": facts,
-            "routable_addresses": routable,
-            "stix_path": str(p),
-            "note": ("preview only, call again with commit=true to create. "
-                     "Routable addresses become live scan and mount targets."),
-        }
-
-    # SourceSchema's pre_load stamps every fact with input_data["id"], so a
-    # body without one raises KeyError before validation and returns a 500.
-    source_id = str(uuid.uuid4())
-    body = {"id": source_id, "name": name, "facts": facts}
+    techniques = _bundle_technique_ids(bundle)
+    if not techniques:
+        return {"error": f"no ATT&CK techniques in {p.name}; nothing to build from"}
 
     import aiohttp
-    url = _caldera_base_url() + "sources"
+
+    wanted = {str(x).lower().strip() for x in (platforms or []) if x}
+    if not wanted:
+        # A report says what to run; only live agents say where. Guessing here
+        # yields a full-looking adversary that runs nothing.
+        url = _caldera_base_url() + "agents"
+        try:
+            async with aiohttp.ClientSession(headers=_caldera_headers()) as session:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                    if resp.status != 200:
+                        return {"error": f"reading agents returned {resp.status}; "
+                                         f"cannot determine platforms"}
+                    agents = json.loads(await resp.text() or "[]")
+        except Exception as e:
+            return {"error": f"could not read agents to determine platforms: {e}"}
+        wanted = {(a.get("platform") or "").lower() for a in agents if a.get("platform")}
+        if not wanted:
+            return {"error": "no agents have checked in, so no platform is known. "
+                             "Deploy an agent, or pass platforms explicitly to preview."}
+
+    url = _caldera_base_url() + "abilities"
+    try:
+        async with aiohttp.ClientSession(headers=_caldera_headers()) as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                if resp.status != 200:
+                    # Collapsing this to an empty list reports a broken API
+                    # key as "the stockpile covers none of this report".
+                    return {"error": f"reading abilities returned {resp.status}"}
+                abilities = json.loads(await resp.text() or "[]")
+    except Exception as e:
+        return {"error": f"could not read abilities: {e}"}
+
+    by_technique: dict[str, list[str]] = {}
+    technique_of: dict[str, str] = {}
+    covered: set[str] = set()
+    excluded_techniques: set[str] = set()
+    available = 0
+    for ab in sorted(abilities, key=lambda a: str(a.get("ability_id") or "")):
+        tid = (ab.get("technique_id") or "").strip()
+        ability_id = ab.get("ability_id")
+        if not tid or not ability_id:
+            continue
+        hits = [t for t in techniques if _technique_matches(t, tid)]
+        if not hits:
+            continue
+        ab_platforms = {(ex.get("platform") or "").lower()
+                        for ex in (ab.get("executors") or []) if ex.get("platform")}
+        if ab_platforms and not (ab_platforms & wanted):
+            excluded_techniques.update(hits)
+            continue
+        available += 1
+        covered.update(hits)
+        technique_of[ability_id] = tid
+        # Bucket under every technique the ability covers, not just the first.
+        # A bundle naming both a parent and its sub-techniques otherwise puts
+        # them all in one bucket, so the cap starves every technique but one.
+        for hit in hits:
+            bucket = by_technique.setdefault(hit, [])
+            if len(bucket) < max(1, max_per_technique):
+                bucket.append(ability_id)
+
+    matched = list(dict.fromkeys(
+        aid for tid in sorted(by_technique) for aid in by_technique[tid]
+    ))
+    try:
+        from plugins.mcp.app.utilities.cti_taxonomy_loader import load_mitre_taxonomy
+        taxonomy = load_mitre_taxonomy()
+    except Exception as e:
+        log.warning("kill-chain ordering unavailable: %r", e)
+        taxonomy = {}
+    # Stable within a phase so the selection stays reproducible.
+    matched.sort(key=lambda aid: (_technique_rank(technique_of.get(aid, ""), taxonomy), aid))
+    unmatched = sorted(set(techniques) - covered - excluded_techniques)
+    platform_excluded = sorted(excluded_techniques - covered)
+
+    adv_name = name or _bundle_actor_name(bundle) or p.name.replace(".stix.json", "")
+    result = {
+        "name": adv_name,
+        "platforms": sorted(wanted),
+        "technique_count": len(techniques),
+        "ability_count": len(matched),
+        "ability_count_available": available,
+        "matched": matched,
+        "unmatched_techniques": unmatched,
+        "platform_excluded": platform_excluded,
+        "committed": False,
+        "stix_path": str(p),
+    }
+    if not commit:
+        return result
+    if not matched:
+        return {**result, "error": "no ability matched any technique; nothing to commit"}
+
+    body = {
+        "name": adv_name,
+        "description": f"Built from {p.name} ({len(matched)} abilities, "
+                       f"{len(techniques)} techniques)",
+        "atomic_ordering": matched,
+    }
+    url = _caldera_base_url() + "adversaries"
     try:
         async with aiohttp.ClientSession(headers=_caldera_headers()) as session:
             async with session.post(url, json=body,
@@ -429,23 +524,14 @@ async def build_source(stix_path: str, source_name: Optional[str] = None,
                 except json.JSONDecodeError:
                     payload = {"raw": text}
                 if resp.status >= 400:
-                    return {
-                        "error": f"source creation returned {resp.status}",
-                        "url": url,
-                        "response": payload,
-                    }
+                    return {**result, "error": f"adversary creation returned {resp.status}",
+                            "response": payload}
     except Exception as e:
-        return {"error": f"source creation request failed: {e}", "url": url}
+        return {**result, "error": f"adversary creation failed: {e}"}
 
-    return {
-        "committed": True,
-        "source_id": source_id,
-        "name": name,
-        "fact_count": len(facts),
-        "facts": facts,
-        "routable_addresses": routable,
-        "stix_path": str(p),
-    }
+    result["committed"] = True
+    result["adversary_id"] = (payload or {}).get("adversary_id")
+    return result
 
 
 @mcp.tool(name="cti_pipeline_run_operation")
@@ -453,6 +539,7 @@ async def run_operation(
     adversary_id: str,
     agent_paws: list,
     operation_name: Optional[str] = None,
+    source_id: Optional[str] = None,
 ) -> dict:
     """Start a Caldera v2 operation against an adversary using listed agents.
 
@@ -462,10 +549,14 @@ async def run_operation(
 
     Args:
         adversary_id: ID of the adversary to emulate.
-        agent_paws: list of agent paw strings to scope the operation to.
-            When empty, Caldera will run against all agents in the
-            'group' (defaults to 'red').
+        agent_paws: agents the caller intends to target. Recorded on the
+            result for correlation only. Caldera scopes an operation by
+            'group', and OperationSchema discards any other key, so this
+            does NOT narrow the run. Every agent in the group takes part.
         operation_name: optional name; auto-generated when absent.
+        source_id: optional fact source to seed the operation with. Defaults
+            to Caldera's 'basic' source. Facts about the operator's own
+            estate come from the operator, never from a threat report.
 
     Returns:
         {operation_id, state, name, response}
@@ -483,7 +574,7 @@ async def run_operation(
         "adversary": {"adversary_id": adversary_id},
         "group": "red",
         "planner": {"id": "atomic"},
-        "source": {"id": "basic"},
+        "source": {"id": source_id or "basic"},
         "state": "running",
         "autonomous": 1,
         "auto_close": False,
@@ -492,13 +583,6 @@ async def run_operation(
         "visibility": 51,
         "use_learning_parsers": True,
     }
-    if agent_paws:
-        # v2 API accepts paws via the 'group' or 'agents' field shape;
-        # we pass it as a hint via name suffix so downstream observers
-        # can correlate - the actual paw filtering happens through
-        # group membership which sandcat agents already apply.
-        body["_target_paws"] = list(agent_paws)
-
     import aiohttp
     url = _caldera_base_url() + "operations"
     try:
@@ -523,69 +607,9 @@ async def run_operation(
         "state": (payload or {}).get("state", body["state"]),
         "name": (payload or {}).get("name", name),
         "adversary_id": adversary_id,
-        "target_paws": list(agent_paws),
-        "response": payload,
-    }
-
-
-@mcp.tool(name="cti_pipeline_validate_detections")
-async def validate_detections(operation_id: str) -> dict:
-    """Score a finished operation against the SIEM detection rules.
-
-    Wraps the detections plugin's POST /plugin/detections/validate
-    endpoint, which itself calls DetectionService.validate_operation.
-
-    Args:
-        operation_id: the Caldera operation id to score.
-
-    Returns:
-        {coverage_pct, summary, links_validated, per_link, response}
-    """
-    if not operation_id:
-        return {"error": "operation_id is required"}
-
-    import aiohttp
-    url = _caldera_root().rstrip("/") + "/plugin/detections/validate"
-    body = {"operation_id": operation_id}
-    try:
-        async with aiohttp.ClientSession(headers=_caldera_headers()) as session:
-            async with session.post(url, json=body, timeout=aiohttp.ClientTimeout(total=120)) as resp:
-                text = await resp.text()
-                try:
-                    payload = json.loads(text) if text else {}
-                except json.JSONDecodeError:
-                    payload = {"raw": text}
-                if resp.status >= 400:
-                    return {
-                        "error": f"validate returned {resp.status}",
-                        "url": url,
-                        "response": payload,
-                    }
-    except Exception as e:
-        return {"error": f"detections validate request failed: {e}", "url": url}
-
-    # The detection_gui endpoint returns {results: [...], summary: {...}}.
-    summary = (payload or {}).get("summary") or {}
-    results = (payload or {}).get("results") or []
-    coverage = summary.get("mean_coverage")
-    if coverage is None and isinstance(summary.get("coverage_pct"), (int, float)):
-        coverage = summary["coverage_pct"]
-
-    per_link = []
-    for r in results:
-        # detection_svc returns dataclass dumps; defensive against shape drift.
-        per_link.append({
-            "link_id": r.get("link_id") if isinstance(r, dict) else None,
-            "matching_rules": (r or {}).get("matching_rules") if isinstance(r, dict) else None,
-            "coverage_score": (r or {}).get("coverage_score") if isinstance(r, dict) else None,
-        })
-
-    return {
-        "operation_id": operation_id,
-        "coverage_pct": coverage,
-        "links_validated": len(per_link),
-        "summary": summary,
-        "per_link": per_link,
+        # Named for what it is: the caller's request, not an applied filter.
+        "requested_paws": list(agent_paws),
+        "group": body["group"],
         "response": payload,
     }
 

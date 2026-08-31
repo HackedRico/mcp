@@ -13,11 +13,10 @@ Output conforms to:
     ir["threat_actors"] cleaned + normalized
 """
 
-import spacy
-import re
-from rapidfuzz import fuzz
 
-nlp = spacy.load("en_core_web_lg")
+from plugins.mcp.app.utilities.nlp_model import get_nlp
+import re
+
 
 def _log(msg: str):
     """Simple stdout logger for tee-based debugging."""
@@ -85,8 +84,18 @@ def is_valid_actor(name: str) -> bool:
         return False
     if any(cue in name_l for cue in VALID_ACTOR_CUES):
         return True
-    # if name is short and proper-noun-like, keep it
-    return len(name) <= 25 and name.isalpha()
+    # If it is short and proper-noun-like, keep it. isalpha() over the whole
+    # string is False as soon as there is a space, so every two-word actor was
+    # dropped: Berserk Bear, Wizard Spider, Fancy Bear and Cozy Bear included,
+    # two of which this docstring says to keep. Digits are allowed because
+    # FIN7 and TA505 are names, but a bare number is not.
+    parts = name.replace("-", " ").split()
+    return (
+        len(name) <= 25
+        and bool(parts)
+        and all(p.isalnum() for p in parts)
+        and any(c.isalpha() for c in name)
+    )
 
 def normalize_actor_name(name: str):
     """Remove possessives and common suffixes."""
@@ -106,7 +115,7 @@ def clean_ir_nlp_layer1(ir: dict, original_text: str) -> dict:
         - entity canonical names
     """
     _log("Beginning NLP Layer #1")
-    doc = nlp(original_text)
+    doc = get_nlp()(original_text)
 
     # ------------------------
     # Behavior Extraction
@@ -136,7 +145,7 @@ def clean_ir_nlp_layer1(ir: dict, original_text: str) -> dict:
     filtered = []
 
     for m in merged:
-        doc_b = nlp(m)
+        doc_b = get_nlp()(m)
 
         # Require at least one VERB
         if not any(t.pos_ == "VERB" for t in doc_b):
@@ -192,14 +201,11 @@ def clean_ir_nlp_layer1(ir: dict, original_text: str) -> dict:
     # ------------------------
     # Canonicalization
     # ------------------------
-    ir["malware"] = _canonicalize_list(ir.get("malware", []))
-    ir["tools"] = _canonicalize_list(ir.get("tools", []))
-    ir["infrastructure"] = _canonicalize_list(ir.get("infrastructure", []))
     ir["threat_actors"] = _canonicalize_list(ir.get("threat_actors", []))
 
     _log(
         f"Canonicalized "
-        f"{len(ir['malware']) + len(ir['tools']) + len(ir['infrastructure']) + len(ir['threat_actors'])} entities"
+        f"{len(ir['threat_actors'])} threat actors"
     )
 
     return ir
@@ -248,7 +254,7 @@ def _cosine(a, b) -> float:
 def dedupe_behaviors_by_vector(texts: list[str], threshold: float = 0.92) -> list[str]:
     kept: list[tuple[str, any]] = []
     for t in texts:
-        v = nlp(t).vector
+        v = get_nlp()(t).vector
         merged = False
         for i, (kt, kv) in enumerate(kept):
             if _cosine(v, kv) >= threshold:

@@ -143,20 +143,6 @@
           </div>
 
           <div class="field">
-            <label class="label">Temperature</label>
-            <div class="control">
-              <input
-                class="input"
-                type="number"
-                v-model.number="globalConfig.temperature"
-                step="0.1"
-                min="0.1"
-                max="1"
-              />
-            </div>
-          </div>
-
-          <div class="field">
             <label class="label">API Base</label>
             <div class="control">
               <input
@@ -188,6 +174,20 @@
           </div>
 
           <div class="field">
+            <label class="label">Temperature</label>
+            <div class="control">
+              <input
+                class="input"
+                type="number"
+                v-model.number="globalConfig.temperature"
+                step="0.1"
+                min="0.1"
+                max="1"
+              />
+            </div>
+          </div>
+
+          <div class="field">
             <label class="label">Max Tool Calls</label>
             <div class="control">
               <input
@@ -212,6 +212,16 @@
               />
             </div>
           </div>
+
+          <p v-if="serverSyncState" class="is-size-7" :class="serverSyncState.tone">
+            {{ serverSyncState.message }}
+          </p>
+
+          <p class="is-size-7 has-text-grey-light">
+            Model, endpoint and limits are saved on the server and used by
+            every workflow, including CTI extraction. The API key stays in
+            this browser and is never written to disk.
+          </p>
 
           <p class="is-size-7 has-text-grey-light">
             Server toggles and capability settings (e.g. RAG file picker)
@@ -286,7 +296,7 @@
                   <div class="box" style="background-color: #4a4a4a; border-left: 4px solid #3273dc;">
                     <h5 class="title is-6 has-text-light">Threat Hunter</h5>
                     <p class="is-size-7 has-text-light">
-                      Analyzes adversary profile data to identify potential threats and suggests detection rules.
+                      Turns a threat report into an adversary profile and reports which techniques have no matching ability.
                     </p>
                   </div>
                 </div>
@@ -500,7 +510,7 @@ async function handleCustomSubmit() {
 </template>
 
 <script setup>
-import { ref, provide, reactive, watch, onMounted, computed } from 'vue'
+import { ref, provide, reactive, watch, onMounted, nextTick, computed } from 'vue'
 // Both built-in workflows render through the same chat-style component;
 // per-workflow behaviour (system prompt, accepted capabilities, chat
 // history opt-in) is driven entirely by the workflow's registration
@@ -525,8 +535,16 @@ function loadSelectedPath() {
 // one of the always-on cards: "history", "guide", "cti".
 const selectedPath = ref(loadSelectedPath())
 
-function setSelectedPath(path) {
+async function setSelectedPath(path) {
+  // The CTI panel reads the connection from the server when it mounts, and
+  // this sync is debounced. Navigating inside that window showed the panel
+  // the pre-edit endpoint until the next visit, so flush first.
+  await flushGlobalConfigSync()
   selectedPath.value = path
+  // This view is only hidden while a sub-view is open, never unmounted, so
+  // returning to it would otherwise show whatever it held on first mount.
+  // The CTI panel edits temperature and max_tokens on the same profile.
+  if (!path) await refreshServerDefaults()
 }
 
 function selectedPathExists(path) {
@@ -544,7 +562,15 @@ const LOCAL_STORAGE_KEY = 'mcp_global_config'
 // apiBase: the endpoint moved out of the repo into MCP_LLM_API_BASE, and a
 // value saved before that outranks it on every request, silently routing to
 // an endpoint the deployment no longer configures.
-const CONFIG_SCHEMA_VERSION = 2
+// v3 drops the connection. It is server state now: conf/local.yml is what
+// every workflow reads, and a browser-local copy shadowing it is why the
+// Global panel and the CTI panel could name two different models.
+const CONFIG_SCHEMA_VERSION = 3
+
+// Mirrors the llm profile the server owns. Never persisted locally again.
+const CONNECTION_FIELDS = [
+  'modelName', 'apiBase', 'sslVerify', 'temperature', 'maxTokens', 'maxToolCalls',
+]
 
 // localStorage is readable by anything on this origin, so keys live in memory
 // for the session only. Matched by name at any depth: a fixed list missed
@@ -567,7 +593,8 @@ function stripSecrets(value) {
 // artifacts, applied deliberately. Only the ambient default is dropped.
 function migrate(config) {
   if (config.schemaVersion === CONFIG_SCHEMA_VERSION) return config
-  const { apiBase, ...rest } = config
+  const rest = { ...config }
+  for (const key of CONNECTION_FIELDS) delete rest[key]
   return { ...rest, schemaVersion: CONFIG_SCHEMA_VERSION }
 }
 
@@ -588,8 +615,12 @@ function loadConfig() {
 
 function saveConfig(config) {
   try {
+    const persisted = stripSecrets(config)
+    // The server owns these. Keeping a copy here is what let the two panels
+    // disagree, and a stale copy outranks the server on the next load.
+    for (const key of CONNECTION_FIELDS) delete persisted[key]
     localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify({
-      ...stripSecrets(config),
+      ...persisted,
       schemaVersion: CONFIG_SCHEMA_VERSION,
     }))
   } catch (e) {
@@ -610,18 +641,16 @@ function saveConfig(config) {
 // not in the global LM config, since they belong to the RAG capability and
 // are settable per workflow run.
 const savedConfig = loadConfig()
-const LEGACY_CHAT_MODEL_DEFAULTS = new Set([
-  'openai/nemotron-3-super',
-  'meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8',
-])
 const globalConfig = reactive({
-  modelName: savedConfig?.modelName || '',
-  temperature: savedConfig?.temperature,
-  apiBase: savedConfig?.apiBase || '',
+  // The connection comes from the server on mount. Seeding it from
+  // localStorage is what let this panel and the CTI panel disagree.
+  modelName: '',
+  temperature: undefined,
+  apiBase: '',
   apiKey: savedConfig?.apiKey || '',
-  sslVerify: savedConfig?.sslVerify,
-  maxToolCalls: savedConfig?.maxToolCalls,
-  maxTokens: savedConfig?.maxTokens,
+  sslVerify: undefined,
+  maxToolCalls: undefined,
+  maxTokens: undefined,
   serversByWorkflow: savedConfig?.serversByWorkflow || {},
   capabilitiesByWorkflow: savedConfig?.capabilitiesByWorkflow || {},
   capabilitySettings: savedConfig?.capabilitySettings || {},
@@ -696,16 +725,25 @@ function deleteSelectedEndpointProfile() {
   selectedEndpointProfileName.value = ''
 }
 
+// What the server is known to hold: seeded from /defaults, then updated after
+// every successful save. The sync diffs against this.
+const syncedToServer = reactive({})
+
 function applyServerDefaults(d) {
-  // Only fill fields the user hasn't already set.
-  if (!globalConfig.modelName || LEGACY_CHAT_MODEL_DEFAULTS.has(globalConfig.modelName)) {
-    globalConfig.modelName = d.model || ''
-  }
-  if (!globalConfig.apiBase)              globalConfig.apiBase       = d.api_base || ''
-  if (globalConfig.sslVerify == null)     globalConfig.sslVerify     = d.ssl_verify ?? true
-  if (globalConfig.temperature   == null) globalConfig.temperature   = d.temperature
-  if (!globalConfig.maxToolCalls)         globalConfig.maxToolCalls  = d.max_tool_calls
-  if (!globalConfig.maxTokens)            globalConfig.maxTokens     = d.max_tokens
+  Object.assign(syncedToServer, {
+    model: d.model, api_base: d.api_base, ssl_verify: d.ssl_verify,
+    temperature: d.temperature, max_tokens: d.max_tokens,
+    max_tool_calls: d.max_tool_calls,
+  })
+  // The connection is server state, so these overwrite rather than fill. A
+  // browser-local copy taking precedence is what let this panel and the CTI
+  // panel name two different models.
+  globalConfig.modelName    = d.model || ''
+  globalConfig.apiBase      = d.api_base || ''
+  globalConfig.sslVerify    = d.ssl_verify ?? true
+  globalConfig.temperature  = d.temperature
+  globalConfig.maxToolCalls = d.max_tool_calls
+  globalConfig.maxTokens    = d.max_tokens
   // Seed RAG capability defaults from the backend the first time around.
   if (!globalConfig.capabilitySettings.rag) globalConfig.capabilitySettings.rag = {}
   const rag = globalConfig.capabilitySettings.rag
@@ -731,6 +769,22 @@ const activeWorkflow = computed(() =>
   availableWorkflows.value.find(w => w.id === selectedPath.value) || null
 )
 
+async function refreshServerDefaults() {
+  try {
+    const resp = await fetch('/plugin/mcp/defaults')
+    if (!resp.ok) return
+    // Re-seeding assigns the watched refs, which would queue a save of values
+    // the server just gave us.
+    hydrating = true
+    applyServerDefaults(await resp.json())
+    await nextTick()
+  } catch (e) {
+    console.warn('[MCP] Failed to refresh /plugin/mcp/defaults:', e)
+  } finally {
+    hydrating = false
+  }
+}
+
 onMounted(async () => {
   // Backend-driven defaults so the UI never duplicates yaml values.
   try {
@@ -739,6 +793,11 @@ onMounted(async () => {
   } catch (e) {
     console.warn('[MCP] Failed to fetch /plugin/mcp/defaults:', e)
   }
+
+  // Seeding the fields above mutates the very refs the sync watches. Let that
+  // settle before arming it, or simply opening the page writes conf/local.yml.
+  await nextTick()
+  hydrating = false
 
   // Discover workflows, capabilities, and servers in parallel.
   try {
@@ -800,6 +859,111 @@ onMounted(async () => {
 watch(globalConfig, (newConfig) => {
   saveConfig(newConfig)
 }, { deep: true })
+
+/* ============================================================
+ * Server-side sync
+ *
+ * The endpoint used to live only in this browser, so it configured chat and
+ * planning while the CTI pipeline read conf/local.yml and quietly used
+ * something else. The connection fields now write to the llm profile, which
+ * every workload inherits.
+ *
+ * The api key is deliberately excluded and stays in this browser, riding
+ * each request. set_config scrubs it too, so a mistake here cannot put a
+ * credential on disk.
+ *
+ * Debounced because these inputs persist on every keystroke; without it one
+ * edit to a model name rewrote local.yml a dozen times.
+ * ============================================================ */
+const SERVER_SYNC_DEBOUNCE_MS = 800
+let serverSyncTimer = null
+// Armed only once the fields have been seeded from /defaults and localStorage.
+let hydrating = true
+const serverSyncState = ref(null)
+
+async function syncGlobalConfigToServer() {
+  // Diffed against what the server is known to hold, NOT against the mount
+  // time snapshot. Comparing to the snapshot meant editing a value away and
+  // back again sent nothing on the way back, so the server kept the
+  // intermediate value while this panel displayed the original.
+  //
+  // /defaults reports api_base already resolved from MCP_LLM_API_BASE, and
+  // api_base is yaml-first, so an unchanged field must not be echoed back or
+  // it pins the variable's current value into local.yml and kills the
+  // variable.
+  const edited = {}
+  const put = (key, value, known) => {
+    // undefined means never seeded. An empty string is a deliberate clear,
+    // for instance blanking api_base to fall back to the env var, and the
+    // watcher is armed only after hydration so every call here is a real edit.
+    if (value === undefined) return
+    if (value === known) return
+    edited[key] = value === null ? '' : value
+  }
+  put('model', globalConfig.modelName, syncedToServer.model)
+  put('api_base', globalConfig.apiBase, syncedToServer.api_base)
+  put('ssl_verify', globalConfig.sslVerify, syncedToServer.ssl_verify)
+  put('temperature', globalConfig.temperature, syncedToServer.temperature)
+  put('max_tokens', globalConfig.maxTokens, syncedToServer.max_tokens)
+  put('max_tool_calls', globalConfig.maxToolCalls, syncedToServer.max_tool_calls)
+
+  if (!Object.keys(edited).length) {
+    serverSyncState.value = null
+    return
+  }
+
+  const payload = { llm: edited }
+  try {
+    const res = await fetch('/plugin/mcp/set_config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    })
+    if (!res.ok) {
+      // The endpoint composes a specific message for a rejected key; throwing
+      // the status code alone discards the only thing that explains the
+      // refusal.
+      const body = await res.json().catch(() => null)
+      throw new Error(body?.error || `HTTP ${res.status}`)
+    }
+    // The server now holds these, so a later edit back to the previous value
+    // is a real change again. On failure this is deliberately not updated, so
+    // the next edit retries the whole diff rather than silently dropping it.
+    Object.assign(syncedToServer, edited)
+    serverSyncState.value = { message: 'Saved to server', tone: 'has-text-success' }
+  } catch (e) {
+    serverSyncState.value = { message: `Not saved: ${e.message}`, tone: 'has-text-danger' }
+  }
+}
+
+// Send a queued change now rather than at the end of the debounce. Used when
+// leaving the panel for a view that reads the connection from the server.
+async function flushGlobalConfigSync() {
+  if (!serverSyncTimer) return
+  clearTimeout(serverSyncTimer)
+  serverSyncTimer = null
+  await syncGlobalConfigToServer()
+}
+
+watch(
+  () => [
+    globalConfig.modelName,
+    globalConfig.apiBase,
+    globalConfig.sslVerify,
+    globalConfig.temperature,
+    globalConfig.maxTokens,
+    globalConfig.maxToolCalls,
+  ],
+  () => {
+    if (hydrating) return
+    serverSyncState.value = { message: 'Saving…', tone: 'has-text-grey' }
+    clearTimeout(serverSyncTimer)
+    serverSyncTimer = setTimeout(() => {
+      serverSyncTimer = null
+      syncGlobalConfigToServer()
+    }, SERVER_SYNC_DEBOUNCE_MS)
+  },
+)
 
 watch(selectedPath, (path) => {
   try {

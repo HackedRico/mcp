@@ -11,7 +11,7 @@ import asyncio
 from contextlib import AsyncExitStack
 
 from plugins.mcp.app.config import caldera_connection, llm_defaults, mlflow_settings
-from plugins.mcp.app.mlflow_run import RunTracker
+from plugins.mcp.app.mlflow_run import RunTracker, summarize_exception
 from plugins.mcp.app.dspy_env import (
     ENV_API_BASE,
     ENV_API_KEY,
@@ -74,8 +74,14 @@ def get_env(lm_settings=None):
         env[ENV_API_KEY] = str(lm_settings.get('api_key') or '')
         env[ENV_API_BASE] = str(lm_settings.get('api_base') or '')
         env[ENV_PROVIDER] = str(lm_settings.get('provider') or 'openai_compatible')
-        env[ENV_TEMPERATURE] = str(lm_settings.get('temperature') or 0.5)
-        env[ENV_MAX_TOKENS] = str(lm_settings.get('max_tokens') or 24000)
+        # 0.0 is falsy, and it is the shipped value: default.yml sets
+        # temperature 0 because Stage 1 parses the model's own output as JSON.
+        # "or" silently exported 0.5 instead, so the setting never reached the
+        # subprocess. The two lines below already guard this correctly.
+        if lm_settings.get('temperature') is not None:
+            env[ENV_TEMPERATURE] = str(lm_settings.get('temperature'))
+        if lm_settings.get('max_tokens') is not None:
+            env[ENV_MAX_TOKENS] = str(lm_settings.get('max_tokens'))
         if lm_settings.get('timeout') is not None:
             env[ENV_TIMEOUT] = str(lm_settings.get('timeout'))
         if lm_settings.get('ssl_verify') is not None:
@@ -146,13 +152,6 @@ class DSPyCalderaPlannerClientWithRAG(dspy.Signature):
 DSPyCalderaPlannerClient.__doc__ = PLAN_EXECUTE_AGENT_DOC
 DSPyCalderaPlannerClientWithRAG.__doc__ = PLAN_EXECUTE_AGENT_WITH_CTI_DOC
 
-# Factory function to create tool functions with proper closure
-def create_tool_function(session, tool_name, tool_description):
-    async def tool_function(**kwargs):
-        result = await session.call_tool(tool_name, kwargs)
-        return result
-    tool_function.__doc__ = tool_description
-    return tool_function
 
 async def run(adversary_emulation_task: str, lm_obj=None, rag_context=None,
               run_id=None, enabled_servers=None, server_registry=None,
@@ -210,13 +209,14 @@ async def run(adversary_emulation_task: str, lm_obj=None, rag_context=None,
             },
             "cti_pipeline": {
                 "path": cti_pipeline_server_path,
+                # Fallback for when the server's MCP_METADATA cannot be read.
+                # This copy still advertised a deploy step and detection
+                # validation, neither of which exists, and the planner reads
+                # descriptions to decide what it can do.
                 "metadata": {
                     "display_name": "CTI Pipeline",
                     "default_enabled": False,
-                    "description": (
-                        "CTI ingest -> STIX -> adversary -> "
-                        "deploy -> operation -> detection-validation tools."
-                    ),
+                    "description": "CTI pipeline tools. Server metadata unavailable.",
                 },
             },
         }
@@ -347,7 +347,7 @@ async def run(adversary_emulation_task: str, lm_obj=None, rag_context=None,
         print(tb)
         tracker.set_tag("status", "failed")
         tracker.set_tag("stage", "error")
-        tracker.log_param("error", str(e))
+        tracker.log_param("error", summarize_exception(e))
         tracker.log_param("traceback", tb)
         if created_local_run:
             tracker.terminate("FAILED")

@@ -1,104 +1,87 @@
 <!-- ============================================================
      MODEL CONFIG PANEL (per-profile LLM settings)
 
-     Edits one server-side profile in conf/local.yml via
-     /plugin/mcp/set_config. Distinct from mcp.vue's Global Model
-     Config, which is browser-local and only rides along on
-     /execute requests.
+     Edits one workload profile in conf/local.yml via
+     /plugin/mcp/set_config. The connection belongs to the global llm
+     profile, which mcp.vue's Global Model Config writes; a workload
+     profile may only adjust generation settings.
      ============================================================ -->
 <template>
   <div class="box model-config">
 
     <!-- ======================================================
-         HEADER / DISCLOSURE
+         HEADER
          ====================================================== -->
-    <div
-      class="model-config__header is-flex is-justify-content-space-between is-align-items-center"
-      :class="{ 'mb-3': expanded }"
-      role="button"
-      tabindex="0"
-      :aria-expanded="String(expanded)"
-      @click="expanded = !expanded"
-      @keydown.enter.prevent="expanded = !expanded"
-      @keydown.space.prevent="expanded = !expanded"
-    >
+    <div class="model-config__header mb-3">
       <h3 class="title is-6 has-text-primary mb-0">{{ title }}</h3>
-
-      <span class="icon">
-        <svg v-if="expanded" viewBox="0 0 448 512">
-          <path
-            fill="currentColor"
-            d="M432 256c0 17.7-14.3 32-32 32H48c-17.7 0-32-14.3-32-32s14.3-32 32-32h352c17.7 0 32 14.3 32 32z"
-          />
-        </svg>
-        <svg v-else viewBox="0 0 448 512">
-          <path
-            fill="currentColor"
-            d="M256 80c17.7 0 32 14.3 32 32v112h112c17.7 0 32 14.3 32 32s-14.3 32-32 32H288v112c0 17.7-14.3 32-32 32s-32-14.3-32-32V288H112c-17.7 0-32-14.3-32-32s14.3-32 32-32h112V112c0-17.7 14.3-32 32-32z"
-          />
-        </svg>
-      </span>
     </div>
 
     <!-- ======================================================
          CONFIG FORM
          ====================================================== -->
-    <div v-if="expanded" class="model-config__body">
+    <div class="model-config__body">
 
-      <div class="field" v-for="f in requiredFields" :key="f.key">
-        <label class="label is-small">{{ f.label }}</label>
-        <input
-          class="input is-small"
-          :class="{ 'is-danger': !local[f.key] }"
-          v-model="local[f.key]"
-        />
-        <p v-if="!local[f.key]" class="help is-danger">Required</p>
+      <!-- Read-only. The connection belongs to the global profile and a
+           workload profile cannot override it, so this is always what will
+           run. It is shown because extraction silently using a different
+           endpoint is the failure this design removed. -->
+      <div class="resolved mb-3">
+        <p class="resolved__title">Extraction will use</p>
+        <p class="resolved__row">
+          <span class="resolved__label">Model</span>
+          <span class="resolved__value">{{ resolvedModel }}</span>
+        </p>
+        <p class="resolved__row">
+          <span class="resolved__label">Endpoint</span>
+          <span class="resolved__value">{{ resolvedApiBase }}</span>
+        </p>
+        <p class="help mt-2">
+          Set in <strong>Global Model Config</strong>. Extraction shares one
+          endpoint with chat and planning; only the settings below differ.
+        </p>
       </div>
 
       <div class="field">
-        <label class="label is-small">API Base URL</label>
-        <input class="input is-small" v-model="local.api_base" placeholder="Optional override" />
-        <p class="help">Blank falls back to <code>{{ apiBaseEnv }}</code>.</p>
-      </div>
-
-      <div class="field">
-        <label class="label is-small">Temperature</label>
-        <input class="input is-small" type="number" step="0.1" min="0" max="1"
+        <label class="label">Temperature</label>
+        <input class="input" type="number" step="0.1" min="0" max="1"
                v-model.number="local.temperature" />
+        <p class="help">
+          Shared with <strong>Global Model Config</strong>. 0 keeps extraction
+          repeatable, because Stage 1 parses the model's own output as JSON.
+        </p>
       </div>
 
       <div class="field">
-        <label class="label is-small">Max Tokens</label>
-        <input class="input is-small" type="number" v-model.number="local.max_tokens" />
+        <label class="label">Max Tokens</label>
+        <input class="input" type="number" v-model.number="local.max_tokens" />
+        <p class="help">Shared with <strong>Global Model Config</strong>.</p>
       </div>
 
       <div class="field">
-        <label class="checkbox is-size-7">
+        <label class="checkbox">
           <input type="checkbox" v-model="local.offline" /> Offline mode
         </label>
-      </div>
-
-      <div class="field">
-        <label class="checkbox is-size-7">
-          <input type="checkbox" v-model="local.use_mock" /> Use mock responses
-        </label>
+        <p class="help">
+          Skips the LLM entirely and extracts with spaCy and the MITRE
+          taxonomy. No network calls and no API key, at lower recall. This is
+          also the automatic fallback when the endpoint cannot be reached.
+        </p>
       </div>
 
       <p class="help">
-        The API key is never written to disk. It resolves at runtime from
-        <code>{{ apiKeyEnv }}</code>.
+        Embeddings reuse the global model unless one is named explicitly.
       </p>
     </div>
 
     <!-- ======================================================
          SAVE
          ====================================================== -->
-    <div v-if="expanded" class="model-config__footer is-flex is-align-items-center is-justify-content-flex-end mt-3">
+    <div class="model-config__footer is-flex is-align-items-center is-justify-content-flex-end mt-3">
       <span v-if="saveState" class="help mt-0 mr-2" :class="saveState.tone">
         {{ saveState.message }}
       </span>
       <button
-        class="button is-success is-small"
+        class="button is-success"
         :disabled="!isValid || saving"
         :class="{ 'is-loading': saving }"
         @click="save"
@@ -129,7 +112,6 @@ const emit = defineEmits(['saved'])
 /* ============================================================
  * State
  * ============================================================ */
-const expanded = ref(false)
 const local = reactive({})
 const saving = ref(false)
 const saveState = ref(null)
@@ -137,19 +119,23 @@ const saveState = ref(null)
 /* ============================================================
  * Validation
  *
- * Only the fields set_config actually persists are required.
- * api_base and api_key resolve from the environment, so demanding
- * them here left Save permanently disabled.
+ * Every field here is an optional override with a shipped default, and
+ * provider and model now live on the global profile, so there is nothing
+ * left to require. Demanding a field this panel does not edit would leave
+ * Save permanently disabled.
  * ============================================================ */
-const requiredFields = [
-  { key: 'provider', label: 'Provider' },
-  { key: 'model', label: 'Model' }
-]
+const resolvedModel = computed(
+  () => props.backendConfig?.resolved_model || 'not set'
+)
+const resolvedApiBase = computed(
+  () => props.backendConfig?.resolved_api_base || 'not set'
+)
+const isValid = computed(
+  () => local.temperature === null || local.temperature === undefined
+    ? true
+    : local.temperature >= 0 && local.temperature <= 1
+)
 
-const isValid = computed(() => requiredFields.every(f => !!local[f.key]))
-
-const apiBaseEnv = computed(() => props.backendConfig?.api_base_env || 'MCP_LLM_API_BASE')
-const apiKeyEnv = computed(() => props.backendConfig?.api_key_env || 'MCP_LLM_API_KEY')
 
 /* ============================================================
  * Sync
@@ -184,15 +170,20 @@ async function save() {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        [props.configKey]: {
-          provider: local.provider,
-          model: local.model,
-          api_base: local.api_base || '',
+        // temperature and max_tokens go to the global profile, so editing them
+        // here is editing the same value Global Model Config shows. Two copies
+        // drifted: this panel read 0 and 8192 while that one read 0.5 and
+        // 24000, and nothing said which a run would use.
+        llm: {
           temperature: local.temperature,
-          max_tokens: local.max_tokens,
+          max_tokens: local.max_tokens
+        },
+        // The connection is deliberately absent. Writing it back would pin a
+        // copy of the global endpoint into local.yml, which is the duplication
+        // this profile now inherits its way out of.
+        [props.configKey]: {
           timeout: local.timeout,
-          offline: local.offline,
-          use_mock: local.use_mock
+          offline: local.offline
         }
       })
     })
@@ -210,27 +201,55 @@ async function save() {
 </script>
 
 <style scoped>
-/* ============================================================
- * STICKY SIDEBAR
- * ============================================================ */
+/* The panel fills its column so it shares a baseline with the box beside
+   it. The form is short enough now that it needs no scroll of its own. */
 .model-config {
-  position: sticky;
-  top: 1rem;
   display: flex;
   flex-direction: column;
-  /* Without a viewport-bound ceiling a long form scrolls its own Save
-     button off-screen, since the box itself never scrolls. */
-  max-height: calc(100vh - 2rem);
+  flex-grow: 1;
+  width: 100%;
 }
 
-.model-config__header {
-  cursor: pointer;
-}
-
+/* Pushes Save to the bottom edge, level with the box alongside. */
 .model-config__body {
-  /* Flex children default to min-height:auto and refuse to shrink,
-     which would defeat the overflow. */
-  min-height: 0;
-  overflow-y: auto;
+  flex-grow: 1;
+}
+
+.resolved {
+  border: 1px solid rgba(158, 98, 255, 0.35);
+  border-radius: 6px;
+  background-color: #242424;
+  padding: 0.75rem;
+}
+.resolved__title {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #a0a0a0;
+  margin: 0 0 0.4rem;
+}
+.resolved__row {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  margin: 0 0 0.2rem;
+}
+.resolved__label {
+  min-width: 4.5rem;
+  color: #a0a0a0;
+  font-size: 0.8125rem;
+}
+.resolved__value {
+  color: #f5f5f5;
+  word-break: break-all;
+  flex: 1;
+}
+
+/* Bulma's .help is 0.75rem, which is too tight for prose that explains what
+   a setting does rather than just labelling it. */
+.model-config__body :deep(.help) {
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  color: #b5b5b5;
 }
 </style>

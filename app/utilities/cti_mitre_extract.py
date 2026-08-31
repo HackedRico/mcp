@@ -14,8 +14,9 @@ This module performs NO orchestration.
 
 import re
 import numpy as np
-import spacy
-from datetime import datetime
+
+from plugins.mcp.app.utilities.nlp_model import get_nlp
+from datetime import datetime, timezone
 import uuid
 from functools import lru_cache
 from spacy.lang.en.stop_words import STOP_WORDS as SPACY_STOP_WORDS
@@ -25,7 +26,6 @@ from spacy.lang.en.stop_words import STOP_WORDS as SPACY_STOP_WORDS
 # NLP MODEL (GLOBAL SINGLE LOAD)
 # ============================================================
 
-nlp = spacy.load("en_core_web_lg")
 
 
 # ============================================================
@@ -35,7 +35,6 @@ nlp = spacy.load("en_core_web_lg")
 MAX_TECHNIQUES_PER_BEHAVIOR = 2
 MAX_TOTAL_INFERRED = 15
 
-MITRE_DROPPED: list[dict] = []
 
 
 # ============================================================
@@ -44,7 +43,7 @@ MITRE_DROPPED: list[dict] = []
 
 @lru_cache(maxsize=4096)
 def vectorize(text: str):
-    return nlp(text).vector
+    return get_nlp()(text).vector
 
 
 # ============================================================
@@ -152,6 +151,7 @@ def map_behaviors_to_techniques(
       • Ranked before selection
       • Hard global + per-behavior caps
     """
+    dropped_here: list[dict] = []
     if not behaviors or not techniques:
         return []
 
@@ -161,24 +161,24 @@ def map_behaviors_to_techniques(
     for b in behaviors:
         evidence = b.get("text") or b.get("description")
         if not evidence:
-            MITRE_DROPPED.append({"reason": "missing_evidence"})
+            dropped_here.append({"reason": "missing_evidence"})
             continue
 
         ev_tokens = re.findall(r"[a-z0-9]+", evidence.lower())
-        d = nlp(evidence)
+        d = get_nlp()(evidence)
         has_vo = False
         for tok in d:
             if tok.pos_ == "VERB" and any(c.dep_ in ("dobj", "pobj", "attr") for c in tok.children):
                 has_vo = True
                 break
         if not has_vo:
-            MITRE_DROPPED.append({
+            dropped_here.append({
                 "reason": "missing_verb_object_anchor",
                 "behavior": evidence[:160],
             })
             continue
         if len(ev_tokens) < 4:
-            MITRE_DROPPED.append({
+            dropped_here.append({
                 "reason": "evidence_too_short_for_mitre",
                 "behavior": evidence
             })
@@ -186,14 +186,14 @@ def map_behaviors_to_techniques(
 
         short_evidence = len(ev_tokens) < 6
         if short_evidence:
-            MITRE_DROPPED.append({
+            dropped_here.append({
                 "reason": "evidence_short_downweighted",
                 "behavior": evidence[:160]
             })
 
         stop_ratio = sum(1 for t in ev_tokens if t in SPACY_STOP_WORDS) / len(ev_tokens)
         if stop_ratio >= 0.75:
-            MITRE_DROPPED.append({
+            dropped_here.append({
                 "reason": "stopword_heavy",
                 "behavior": evidence[:160]
             })
@@ -238,7 +238,10 @@ def map_behaviors_to_techniques(
     all_scored.sort(key=lambda x: x[0], reverse=True)
     final = [t for _, t in all_scored[:MAX_TOTAL_INFERRED]]
 
-    print(f"[MITRE] inferred={len(final)} dropped={len(MITRE_DROPPED)}")
+    # This counter used to be module state, and Stage 1 runs files on a thread
+    # pool, so it reported every drop since process start rather than this
+    # file's. Nothing outside this module ever read it.
+    print(f"[MITRE] inferred={len(final)} dropped={len(dropped_here)}")
     return final
 
 
@@ -313,11 +316,18 @@ def hashes_to_stix_observed_data(hashes, source_name="cti-report"):
             }
         }
 
+        stamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         observed = {
             "type": "observed-data",
+            "spec_version": "2.1",
             "id": obs_id,
-            "created": datetime.utcnow().isoformat() + "Z",
-            "modified": datetime.utcnow().isoformat() + "Z",
+            "created": stamp,
+            "modified": stamp,
+            # Required by the 2.1 spec. Without them stix2.parse raises
+            # MissingPropertiesError, so any bundle carrying a file hash could
+            # not be loaded by the reference parser at all.
+            "first_observed": stamp,
+            "last_observed": stamp,
             "number_observed": 1,
             "objects": {
                 "0": file_obj
@@ -335,7 +345,7 @@ def evidence_specificity_score(text: str) -> float:
     Returns a multiplier in [0.6, 1.0]
     Penalizes abstract / generic evidence structurally, not lexically.
     """
-    doc = nlp(text)
+    doc = get_nlp()(text)
 
     verbs = [t for t in doc if t.pos_ == "VERB"]
     nouns = [t for t in doc if t.pos_ in ("NOUN", "PROPN")]

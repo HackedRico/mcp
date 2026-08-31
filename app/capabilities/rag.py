@@ -34,7 +34,7 @@ class RAGService:
         if stix_bundle_path:
             self.load_stix_bundle(stix_bundle_path)
     
-    def load_stix_bundle(self, stix_bundle_path: str, embed_model: str = 'openai/text-embedding-3-small'):
+    def load_stix_bundle(self, stix_bundle_path: str, embed_model: str | None = None):
         """Load STIX bundle from file path and build embeddings."""
         try:
             with open(stix_bundle_path, 'r') as f:
@@ -45,7 +45,7 @@ class RAGService:
         except json.JSONDecodeError:
             raise ValueError(f"Invalid JSON in STIX bundle: {stix_bundle_path}")
     
-    def initialize_from_bundles(self, stix_bundles: List[dict], embed_model: str = 'openai/text-embedding-3-small'):
+    def initialize_from_bundles(self, stix_bundles: List[dict], embed_model: str | None = None):
         """Initialize the RAG service with multiple STIX bundles and create retriever."""
         all_corpus = []
         all_adv_step = {}
@@ -56,7 +56,19 @@ class RAGService:
 
         self.corpus = all_corpus
         self.adv_step = all_adv_step
-        
+
+        if not self.corpus:
+            # Embeddings() raises numpy AxisError on an empty corpus, and the
+            # caller swallows it and silently runs without CTI grounding.
+            # Bundles with no attack-pattern and no threat-actor are the
+            # normal way to get here. search_cti_title handles search=None.
+            self.search = None
+            self.log.warning(
+                "[RAG] No attack-pattern or threat-actor objects in the "
+                "selected STIX; CTI retrieval is unavailable for this run"
+            )
+            return
+
         self.log.info("Initializing embeddings and retriever for STIX corpus")
         embedder_kwargs = {"api_key": self.api_key}
         if self.api_base:
@@ -77,10 +89,7 @@ class RAGService:
         adv_step = {}
         
         for obj in stix_bundle.get("objects", []):
-            if obj.get("type") in [
-                "attack-pattern", "malware", "tool", "threat-actor", 
-                "intrusion-set", "identity", "indicator", "report"
-            ]:
+            if obj.get("type") in ["attack-pattern", "threat-actor"]:
                 name = obj.get("name", "")
                 description = obj.get("description", "")
                 
@@ -160,18 +169,7 @@ class RAGService:
         }
 
 
-# Legacy functions for backward compatibility
-def search_cti_title(query: str) -> list[str]:
-    """Legacy function - use RAGService instead."""
-    if 'global_rag_service' in globals():
-        return global_rag_service.search_cti_title(query)
-    return ["RAG service not initialized"]
 
-def search_cti_data_by_title(name: str) -> str:
-    """Legacy function - use RAGService instead."""
-    if 'global_rag_service' in globals():
-        return global_rag_service.search_cti_data_by_title(name)
-    return "RAG service not initialized"
 
 
 # ---------------------------------------------------------------------------
@@ -184,7 +182,6 @@ def search_cti_data_by_title(name: str) -> str:
 # capability registry, this declaration is dormant; the legacy code path in
 # mcp_svc still wires RAG into runs directly.
 
-import os
 import asyncio
 from pathlib import Path
 
@@ -253,7 +250,7 @@ async def _enrich(prompt: str, settings: dict) -> dict:
     settings keys (all optional):
       rag_files       list of filenames under plugins/mcp/data/
       topk            int, defaults to 5
-      embed_model     str, defaults to openai/text-embedding-3-small
+      embed_model     str, falls back to the chat model when unset
       api_key         str, embedding key fallback (mcp_svc fills this with
                       the resolved chat-LLM key when the caller does not
                       override it via embed_api_key)
@@ -271,7 +268,15 @@ async def _enrich(prompt: str, settings: dict) -> dict:
     embed_api_key = settings.get("embed_api_key") or settings.get("api_key") or ""
     embed_api_base = settings.get("embed_api_base") or settings.get("api_base") or None
     ssl_verify = settings.get("ssl_verify")
-    embed_model = settings.get("embed_model") or "openai/text-embedding-3-small"
+    # An undeclared embedding model falls back to the chat model. A deployment
+    # pointing at its own gateway has no reason to reach for an OpenAI model
+    # name it never chose, and that name would be sent to that gateway.
+    embed_model = settings.get("embed_model") or settings.get("model")
+    if not embed_model:
+        raise ValueError(
+            "No embedding model: set embed_model, or a model on the global "
+            "LLM profile for it to inherit."
+        )
     topk = int(settings.get("topk") or 5)
 
     base_dir = Path(__file__).resolve().parent.parent.parent / "data"

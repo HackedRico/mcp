@@ -11,7 +11,7 @@ Async-capable raw → clean extractor used across Stage1.
 
 import re
 import asyncio
-from pathlib import Path
+from pathlib import Path, PurePath
 import trafilatura
 from bs4 import BeautifulSoup
 import aiofiles
@@ -20,7 +20,6 @@ import aiofiles.ospath
 import math
 # import spacy
 
-# _nlp = spacy.load("en_core_web_lg")
 
 # Limit async concurrency
 SEMAPHORE = asyncio.Semaphore(8)
@@ -67,22 +66,60 @@ async def extract_clean_text_from_html(path: Path) -> str:
 # PDF extraction (async)
 # ============================================================
 
+class PdfToolMissing(RuntimeError):
+    """pdftotext is not on PATH. Raised so the caller can report which
+    dependency is absent rather than surfacing a bare FileNotFoundError that
+    reads like the report itself went missing."""
+
+
 async def pdf_to_text(path: Path) -> str:
     async with SEMAPHORE:
-        proc = await asyncio.create_subprocess_exec(
-            "pdftotext",
-            "-layout",
-            str(path),
-            "-",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        out, _ = await proc.communicate()
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "pdftotext",
+                "-layout",
+                str(path),
+                "-",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except FileNotFoundError as e:
+            # pdftotext ships with poppler and is not a pip dependency, so a
+            # stock install has no PDF support until it is installed.
+            raise PdfToolMissing(
+                "pdftotext not found. Install poppler "
+                "(brew install poppler, or apt install poppler-utils) "
+                "to ingest PDF reports."
+            ) from e
+
+        out, err = await proc.communicate()
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"pdftotext failed on {path.name}: "
+                f"{err.decode(errors='ignore')[:200]}"
+            )
         return out.decode(errors="ignore") if out else ""
 
 # ============================================================
 # Process a single raw file
 # ============================================================
+
+def clean_stem(src_name: str) -> str:
+    """The clean-file stem for a source filename, one source to one stem.
+
+    Every branch used to write <stem>.txt, so report.md and report.txt both
+    became report.txt: whichever finished second replaced the other, and
+    because the cleaner gathers files concurrently a pair could interleave
+    into text belonging to neither. Everything downstream is keyed on this
+    stem, so the two reports also collapsed onto one IR and one bundle.
+
+    Folding the extension in keeps it injective for any two distinct source
+    names that both carry an extension, which upload enforces.
+    """
+    src = PurePath(src_name)
+    ext = src.suffix.lstrip(".").lower()
+    return f"{src.stem}_{ext}" if ext else src.stem
+
 
 async def process_raw_file(path: Path, clean_dir: Path, images_dir: Path):
     ext = path.suffix.lower()
@@ -104,7 +141,7 @@ async def process_raw_file(path: Path, clean_dir: Path, images_dir: Path):
         if not cleaned.strip():
             return f"[SKIP] Empty HTML: {path.name}"
 
-        out = clean_dir / (path.stem + ".txt")
+        out = clean_dir / (clean_stem(path.name) + ".txt")
         async with aiofiles.open(out, "w", encoding="utf-8") as f:
             await f.write(cleaned)
 
@@ -114,12 +151,18 @@ async def process_raw_file(path: Path, clean_dir: Path, images_dir: Path):
     # PDF
     # ---------------------------------------------------------
     if ext == ".pdf":
-        cleaned = await pdf_to_text(path)
+        # Every other branch reports its outcome as a string, so a missing
+        # poppler reports the same way instead of raising through the gather
+        # and discarding the whole batch's results.
+        try:
+            cleaned = await pdf_to_text(path)
+        except (PdfToolMissing, RuntimeError) as e:
+            return f"[ERR] {path.name}: {e}"
 
         if not cleaned.strip():
             return f"[SKIP] Empty PDF: {path.name}"
 
-        out = clean_dir / (path.stem + ".txt")
+        out = clean_dir / (clean_stem(path.name) + ".txt")
         async with aiofiles.open(out, "w", encoding="utf-8") as f:
             await f.write(cleaned)
 
@@ -148,7 +191,11 @@ async def process_raw_file(path: Path, clean_dir: Path, images_dir: Path):
         if not re.search(r"[a-zA-Z]{3,}", stem):
             return f"[SKIP] Non-document filename: {path.name}"
 
-        out = clean_dir / path.name
+        # Normalised like the html and pdf branches. Keeping the original
+        # extension meant a .md upload landed in clean/ as .md, and Stage 1
+        # globs *.txt, so the file was accepted by three UI surfaces and never
+        # parsed.
+        out = clean_dir / (clean_stem(path.name) + ".txt")
         async with aiofiles.open(out, "w", encoding="utf-8") as f:
             await f.write(txt)
 
@@ -173,10 +220,14 @@ async def clean_raw_directory_async(raw_dir: Path, clean_dir: Path, images_dir: 
     print(f"[DEBUG] raw_dir={raw_dir}")
     print(f"[DEBUG] clean_dir={clean_dir}")
     print(f"[DEBUG] images_dir={images_dir}")
-    results = await asyncio.gather(*tasks)
+    # One unhandled failure used to discard every other file's result.
+    results = await asyncio.gather(*tasks, return_exceptions=True)
 
     for line in results:
-        print("   ", line)
+        if isinstance(line, BaseException):
+            print(f"    [ERR] {type(line).__name__}: {line}")
+        else:
+            print("   ", line)
     clean_count = len(list(clean_dir.glob("*.txt")))
     print(f"[DEBUG] clean txt count={clean_count}")
 
@@ -212,14 +263,10 @@ def _is_linguistically_dominant(text: str) -> bool:
     Rejects:
     - Code-only or minified blobs
     """
-    # doc = _nlp(text)
-    import spacy
+    # Resolved inside the function to avoid fork corruption.
+    from plugins.mcp.app.utilities.nlp_model import get_nlp
 
-    # Lazy-load inside function to avoid fork corruption
-    if not hasattr(_is_linguistically_dominant, "_nlp"):
-        _is_linguistically_dominant._nlp = spacy.load("en_core_web_lg")
-
-    doc = _is_linguistically_dominant._nlp(text)
+    doc = get_nlp()(text)
 
     word_tokens = [t for t in doc if t.is_alpha]
     verb_tokens = [t for t in doc if t.pos_ == "VERB"]
@@ -252,22 +299,3 @@ def _is_code_blob(text: str) -> bool:
 
     return False
 
-def _is_valid_cti_text(text: str) -> bool:
-    if not text:
-        return False
-
-    t = text.strip()
-
-    # Too short to be analyst-usable
-    if len(t) < 200:
-        return False
-
-    # Must be linguistically dominant
-    if not _is_linguistically_dominant(t):
-        return False
-
-    # Reject only if code-dominant (not code-containing)
-    if _is_code_blob(t):
-        return False
-
-    return True

@@ -3,28 +3,21 @@
 Logging is preserved verbatim for debug capture via:
 python3 cti_ingest_svc.py --base-dir data --step all 2>&1 | tee -a debug_mitre.log
 
-| Step          | Description                       |
-| ------------- | -------------------------------------- |
-| Raw → Clean   | Normalize source material              |
-| Clean → IR    | LLM extraction of entities & behaviors |
-| NLP Layers    | Improve IR quality                     |
-| MITRE         | Map behaviors to ATT&CK                |
-| Relationships | Build entity graph                     |
-| Validation    | Ensure graph correctness               |
-| Outputs       | Persist IR + summary                   |
-| Scenario      | (Optional) Narrative generation        |
+| Step         | Description                                    |
+| ------------ | ---------------------------------------------- |
+| raw-to-clean | Normalize source material                      |
+| debug-ir     | Stop after IR extraction                       |
+| stage2       | IR -> STIX bundle only                         |
+| all          | Everything, in order                           |
 
 '''
 
 import argparse
-import asyncio
-import json, re
 import shutil
 from enum import Enum
 from pathlib import Path
 
 from plugins.mcp.app.cti_pipeline_stage1 import (
-    ensure_dirs,
     step_raw_to_clean,
     step_parse_to_ir
 )
@@ -70,20 +63,14 @@ class CTIIngestService:
                     step_raw_to_clean(base_dir)
 
                 case "debug-ir":
-                    step_parse_to_ir(base_dir, stop_after="ir")
-
-                case "debug-mitre":
-                    step_parse_to_ir(base_dir, stop_after="mitre")
-
-                case "debug-relationships":
-                    step_parse_to_ir(base_dir, stop_after="relationships")
+                    step_parse_to_ir(base_dir, stop_after="ir", only=self.selected)
 
                 case "stage2":
                     self.run_stage2(base_dir)
 
                 case "all":
                     step_raw_to_clean(base_dir)
-                    step_parse_to_ir(base_dir)
+                    step_parse_to_ir(base_dir, only=self.selected)
 
                     # Only run Stage 2 if IR exists
                     ir_dir = base_dir / "outputs_ir" / "complete"
@@ -121,12 +108,25 @@ class CTIIngestService:
         }
 
     def finalize_run(self, base_dir: Path, selected: list[str]):
+        """Retire the reports this run actually processed.
+
+        This moved everything in uploads/ and never read its own argument, so
+        a report the operator did not select was retired having never been
+        cleaned or extracted. list_cti_raw stamps a literal "processed" on
+        that directory, so it then rendered green.
+
+        An empty selection still means everything, matching the convention
+        step_parse_to_ir uses for the same reason.
+        """
         uploads = base_dir / "raw" / "uploads"
         processed = base_dir / "raw" / "processed"
 
         processed.mkdir(parents=True, exist_ok=True)
 
+        names = set(selected or [])
         for f in uploads.iterdir():
+            if names and f.name not in names:
+                continue
             shutil.move(str(f), processed / f.name)
 
     @staticmethod

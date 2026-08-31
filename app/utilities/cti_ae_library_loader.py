@@ -38,11 +38,9 @@ CLI
 from __future__ import annotations
 
 import argparse
-import datetime
 import json
 import re
 import sys
-from collections import defaultdict
 from functools import lru_cache
 from pathlib import Path
 from typing import Iterable, Optional
@@ -56,33 +54,29 @@ import yaml  # type: ignore
 try:
     from plugins.mcp.app.utilities.cti_stix_builders import (
         make_bundle,
-        make_malware,
-        make_tool,
         make_threat_actor,
-        make_infrastructure,
         make_attack_pattern,
-        make_identity,
-        make_user_account,
-        make_software,
-        make_relationship,
         new_stix_id,
         now,
+    )
+    from plugins.mcp.app.utilities.cti_text_extract import (
+        extract_file_paths,
+        extract_network_subnets,
+        extract_registry_keys,
     )
 except ImportError:  # pragma: no cover - direct-script execution fallback
     sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
     from plugins.mcp.app.utilities.cti_stix_builders import (  # type: ignore
         make_bundle,
-        make_malware,
-        make_tool,
         make_threat_actor,
-        make_infrastructure,
         make_attack_pattern,
-        make_identity,
-        make_user_account,
-        make_software,
-        make_relationship,
         new_stix_id,
         now,
+    )
+    from plugins.mcp.app.utilities.cti_text_extract import (  # type: ignore
+        extract_file_paths,
+        extract_network_subnets,
+        extract_registry_keys,
     )
 
 
@@ -370,20 +364,8 @@ def discover_ae_plans(libraries_root: Optional[Path] = None) -> list[dict]:
 _HEADER_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$", re.MULTILINE)
 _EMOJI_RE = re.compile(r":[A-Za-z0-9_+-]+:")  # :microphone:
 _NONWORD_RE = re.compile(r"[^a-z0-9 &]+")
-_PIPE_SEP_RE = re.compile(r"\s*\|\s*[:\-\s|]+\s*\|?\s*$")
 
 
-def _normalise_header(text: str) -> str:
-    """Strip emoji, Markdown markers, and non-word punctuation from a header."""
-    # Drop "Step 1 - " / "Phase 2 - " / "1. " numeric prefixes
-    text = re.sub(r"^(?:step|phase|part)\s*\d+\s*[-:]\s*", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"^\d+\s*[\.\)-:]\s*", "", text)
-    text = _EMOJI_RE.sub("", text)
-    text = text.replace("&", "&")  # idempotent; placeholder for stylized chars
-    text = text.lower().strip()
-    text = _NONWORD_RE.sub(" ", text)
-    text = re.sub(r"\s+", " ", text).strip()
-    return text
 
 
 def _split_pipe_row(line: str) -> list[str]:
@@ -450,27 +432,6 @@ def _column_index_map(headers: list[str], alias_map: dict[str, str]) -> dict[str
     return out
 
 
-def _find_section_blocks(text: str, alias_to_irkey: dict[str, str]) -> dict[str, list[str]]:
-    """Carve the markdown into ``ir_key -> [text-block-bodies]`` slices.
-
-    A section starts at a header matching one of the aliases and ends at
-    the next header of equal-or-higher level. Multiple matching headers
-    aggregate their bodies into the same IR key.
-    """
-    out: dict[str, list[str]] = defaultdict(list)
-    headers = list(_HEADER_RE.finditer(text))
-    for idx, m in enumerate(headers):
-        h_norm = _normalise_header(m.group(2))
-        ir_key = alias_to_irkey.get(h_norm)
-        # Also try a punctuation-stripped variant
-        if not ir_key:
-            ir_key = alias_to_irkey.get(h_norm.replace(" and ", " & ").strip())
-        if not ir_key:
-            continue
-        start = m.end()
-        end = headers[idx + 1].start() if idx + 1 < len(headers) else len(text)
-        out[ir_key].append(text[start:end])
-    return out
 
 
 # ---------------------------------------------------------------------------
@@ -504,8 +465,6 @@ _ACCOUNT_REF_RE = re.compile(
 # CIDR subnet
 _CIDR_RE = re.compile(r"\b((?:\d{1,3}\.){3}\d{1,3}/\d{1,2})\b")
 
-# File-extension marker like ".skyfl2e"
-_FILE_EXT_RE = re.compile(r"\.([A-Za-z][A-Za-z0-9]{2,8})\b")
 
 # Windows registry key (HKLM\..., HKCU\..., HKEY_..\..)
 _REG_KEY_RE = re.compile(
@@ -529,10 +488,6 @@ _FILENAME_RE = re.compile(r"\b([A-Za-z][\w.-]{2,30})\.(ps1|exe|bat|sh|py|dll|jar
 # Versioned software ("rclone v1.64.0", "Mimikatz 2.2.0")
 _NAME_VERSION_RE = re.compile(r"\b([A-Za-z][\w-]{2,30})\s+v?(\d+\.\d+(?:\.\d+(?:\.\d+)?)?)\b")
 
-# Inline-fact pattern matcher (markdown bold / colon delim)
-_INLINE_FACT_RE = re.compile(
-    r"(?:\*\*|__)?\s*([A-Za-z][A-Za-z \-/]{2,30})\s*(?:\*\*|__)?\s*:\s*[`*]*([A-Za-z][A-Za-z0-9_-]{1,40})",
-)
 
 
 def _extract_techniques(text: str) -> list[str]:
@@ -585,55 +540,6 @@ def _extract_hosts_inline(text: str) -> dict[str, dict]:
         rec = hosts.setdefault(token, {"hostname": token, "ip": "",
                                        "evidence": text[lo:hi][:200]})
     return hosts
-
-
-def _extract_subnets(text: str) -> list[str]:
-    """Explicit CIDR mentions plus /24 subnets derived from each IPv4
-    host address found in the plan.
-
-    AE plans sometimes give the subnet explicitly ("10.20.20.0/24") and
-    sometimes only an individual host ("raremon (10.30.10.4)") -- the
-    derivation step ensures the contractor / management subnets are
-    surfaced even when the plan never spells out the /24.
-    """
-    out: set[str] = {m.group(1) for m in _CIDR_RE.finditer(text)}
-    for ip_match in re.finditer(r"\b((\d{1,3})\.(\d{1,3})\.(\d{1,3})\.\d{1,3})\b", text):
-        octs = ip_match.group(1).split(".")
-        if len(octs) != 4:
-            continue
-        try:
-            i0 = int(octs[0])
-        except ValueError:
-            continue
-        # RFC1918 only (the AE plan ranges); skip 0.x / 127.x / 169.254 etc.
-        if i0 not in (10,) and not (
-            i0 == 172 and 16 <= int(octs[1]) <= 31
-        ) and not (i0 == 192 and int(octs[1]) == 168):
-            continue
-        cidr = f"{octs[0]}.{octs[1]}.{octs[2]}.0/24"
-        out.add(cidr)
-    return sorted(out)
-
-
-def _extract_file_paths(text: str) -> list[str]:
-    out: set[str] = set()
-    for r in (_WIN_PATH_RE, _WIN_ABS_PATH_RE, _UNIX_PATH_RE):
-        for m in r.finditer(text):
-            val = m.group(0).strip().rstrip(".,;:!)")
-            if val and len(val) >= 4:
-                out.add(val)
-    return sorted(out)
-
-
-def _extract_registry(text: str) -> list[str]:
-    out: set[str] = set()
-    for m in _REG_KEY_RE.finditer(text):
-        out.add(m.group(0).rstrip(".,;:"))
-    for m in _REG_VALNAME_RE.finditer(text):
-        out.add(m.group(1))
-    return sorted(out)
-
-
 # Extension stop-list: common script/doc/image extensions that aren't
 # encryption-marker / IOC extensions. Sourced from STIX 2.1 'file' SCO
 # examples + mimetypes stdlib types.
@@ -943,9 +849,6 @@ _LIBRARY_ADVERSARY_TO_THREAT_ACTOR = {
 }
 
 
-def _resolve_adversary_slug(name: str) -> str:
-    """Canonicalise an adversary slug for filename / URL safety."""
-    return re.sub(r"[^a-z0-9]+", "-", (name or "").lower()).strip("-")
 
 
 def parse_ae_plan(plan_meta: dict, *, taxonomy: Optional[dict] = None) -> dict:
@@ -963,7 +866,6 @@ def parse_ae_plan(plan_meta: dict, *, taxonomy: Optional[dict] = None) -> dict:
         user_accounts, domains, attack_patterns, network_subnets,
         file_paths, registry_keys, file_extensions
     """
-    alias_to_irkey = _section_alias_to_irkey()
     col_alias_map = _table_column_alias_map()
 
     # Concatenate all markdown sources for this plan.
@@ -1016,13 +918,13 @@ def parse_ae_plan(plan_meta: dict, *, taxonomy: Optional[dict] = None) -> dict:
     users = _extract_users_from_tables(text, col_alias_map)
 
     # ---- Subnets ----
-    network_subnets = _extract_subnets(text)
+    network_subnets = extract_network_subnets(text)
 
     # ---- File paths ----
-    file_paths = _extract_file_paths(text)
+    file_paths = extract_file_paths(text)
 
     # ---- Registry keys ----
-    registry_keys = _extract_registry(text)
+    registry_keys = extract_registry_keys(text)
 
     # ---- File extensions (as IOC markers) ----
     file_extensions = _extract_extensions(text)
@@ -1110,10 +1012,9 @@ def ae_plan_to_stix(ir: dict, taxonomy: Optional[dict] = None) -> dict:
     """Lower an AE-plan IR dict into a STIX 2.1 bundle.
 
     All object construction goes through the existing cti_stix_builders
-    helpers (``make_malware``, ``make_infrastructure``, ``make_identity``,
-    ``make_user_account``, ``make_software``, ``make_tool``,
-    ``make_threat_actor``, ``make_attack_pattern``, ``make_relationship``).
-    No new builders are introduced.
+    helpers (``make_threat_actor``, ``make_attack_pattern``). The stick is
+    scored against pipeline output, so it emits only the object types the
+    pipeline can still produce.
 
     The returned bundle is JSON-only; pass it through ``stix2.parse(...,
     allow_custom=True)`` to validate spec conformance.
@@ -1145,60 +1046,6 @@ def ae_plan_to_stix(ir: dict, taxonomy: Optional[dict] = None) -> dict:
             ta_ids[ta["name"]] = obj["id"]
             objects.append(obj)
 
-    # ---- Malware ----
-    malware_ids: dict[str, str] = {}
-    for m in ir.get("malware", []):
-        obj = make_malware(m, taxonomy=taxonomy)
-        if obj:
-            malware_ids[m["name"]] = obj["id"]
-            objects.append(obj)
-
-    # ---- Tools ----
-    tool_ids: dict[str, str] = {}
-    for t in ir.get("tools", []):
-        obj = make_tool(t, taxonomy=taxonomy)
-        if obj:
-            tool_ids[t["name"]] = obj["id"]
-            objects.append(obj)
-
-    # ---- Software (SCO) ----
-    for s in ir.get("software", []):
-        obj = make_software(s, taxonomy=taxonomy)
-        if obj:
-            objects.append(obj)
-
-    # ---- Identity SDOs for AD/NetBIOS domains ----
-    for d in ir.get("domains", []):
-        obj = make_identity(d, identity_class="organization")
-        if obj:
-            objects.append(obj)
-
-    # ---- Infrastructure SDOs ----
-    aps_by_id = {ap["id"]: ap for ap in ir.get("attack_patterns", []) if ap.get("id")}
-    related_aps = list(aps_by_id.values())
-    infra_ids: list[str] = []
-    for h in ir.get("infrastructure", []):
-        i_entry = {
-            "name": h.get("hostname") or "",
-            "description": h.get("evidence", ""),
-            "ip": h.get("ip", ""),
-            "role": h.get("role", ""),
-            "os": h.get("os", ""),
-        }
-        obj = make_infrastructure(i_entry, related_attack_patterns=related_aps,
-                                  taxonomy=taxonomy)
-        if obj:
-            infra_ids.append(obj["id"])
-            objects.append(obj)
-
-    # ---- User accounts (SCO) ----
-    user_ids: list[str] = []
-    for u in ir.get("user_accounts", []):
-        obj = make_user_account(u)
-        if obj:
-            user_ids.append(obj["id"])
-            objects.append(obj)
-
     # ---- Attack-pattern SDOs ----
     ap_stix_ids: list[str] = []
     for ap in ir.get("attack_patterns", []):
@@ -1225,26 +1072,6 @@ def ae_plan_to_stix(ir: dict, taxonomy: Optional[dict] = None) -> dict:
             "x_file_extensions":  ir.get("file_extensions", []),
         }
         objects.append(context_obj)
-
-    # ---- Relationships ----
-    # threat-actor uses-> malware
-    for ta_name, ta_id in ta_ids.items():
-        for mal_name, mal_id in malware_ids.items():
-            rel = make_relationship("uses", ta_id, mal_id)
-            if rel:
-                objects.append(rel)
-    # malware targets -> infrastructure
-    for mal_id in malware_ids.values():
-        for inf_id in infra_ids:
-            rel = make_relationship("targets", mal_id, inf_id)
-            if rel:
-                objects.append(rel)
-    # threat-actor uses -> tools
-    for ta_id in ta_ids.values():
-        for tool_id in tool_ids.values():
-            rel = make_relationship("uses", ta_id, tool_id)
-            if rel:
-                objects.append(rel)
 
     bundle = make_bundle(objects, model="ae-library-loader",
                          provider="cti_ae_library_loader",

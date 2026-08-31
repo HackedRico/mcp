@@ -1,5 +1,4 @@
 """Tests for llm_client.py and cti_parsing.py — LLM client and IR parsing."""
-import pytest
 
 
 class TestLoadConfig:
@@ -69,41 +68,45 @@ class TestEnforceIrSchema:
     def test_fills_missing_fields(self):
         from plugins.mcp.app.utilities.cti_parsing import enforce_ir_schema
         result = enforce_ir_schema({})
-        for key in ("threat_actors", "malware", "tools", "infrastructure",
-                    "attack_patterns", "behaviors", "relationships"):
+        for key in ("threat_actors",
+                    "attack_patterns", "behaviors"):
             assert key in result
             assert isinstance(result[key], list)
 
+    def test_does_not_enforce_keys_without_a_producer(self):
+        """relationships had no producer and no consumer after the
+        relationship extractor and builders went."""
+        from plugins.mcp.app.utilities.cti_parsing import enforce_ir_schema
+        assert "relationships" not in enforce_ir_schema({})
+
     def test_preserves_valid_data(self):
         from plugins.mcp.app.utilities.cti_parsing import enforce_ir_schema
-        ir = {"malware": [{"name": "X"}], "tools": [{"name": "Y"}]}
+        ir = {"threat_actors": [{"name": "X"}], "attack_patterns": [{"name": "Y"}]}
         result = enforce_ir_schema(ir)
-        assert len(result["malware"]) == 1
-        assert len(result["tools"]) == 1
+        assert len(result["threat_actors"]) == 1
+        assert len(result["attack_patterns"]) == 1
 
     def test_filters_invalid_entries(self):
         from plugins.mcp.app.utilities.cti_parsing import enforce_ir_schema
-        ir = {"malware": [{"no_name_key": "bad"}, {"name": "good"}]}
+        ir = {"threat_actors": [{"no_name_key": "bad"}, {"name": "good"}]}
         result = enforce_ir_schema(ir)
-        assert len(result["malware"]) == 1
+        assert len(result["threat_actors"]) == 1
 
     def test_wraps_dict_to_list(self):
         from plugins.mcp.app.utilities.cti_parsing import enforce_ir_schema
-        ir = {"malware": {"name": "single"}}
+        ir = {"threat_actors": {"name": "single"}}
         result = enforce_ir_schema(ir)
-        assert isinstance(result["malware"], list)
-        assert len(result["malware"]) == 1
+        assert isinstance(result["threat_actors"], list)
+        assert len(result["threat_actors"]) == 1
 
 
 class TestRenderIrSummary:
     def test_renders(self):
         from plugins.mcp.app.utilities.cti_parsing import render_ir_summary
-        ir = {"threat_actors": [{"name": "APT29"}], "malware": [],
-              "tools": [{"name": "Mimikatz"}], "infrastructure": [],
+        ir = {"threat_actors": [{"name": "APT29"}],
               "attack_patterns": [], "behaviors": [], "relationships": []}
         result = render_ir_summary(ir)
         assert "APT29" in result
-        assert "Mimikatz" in result
 
 
 class TestBuildIrPrompt:
@@ -118,39 +121,6 @@ class TestBuildIrPrompt:
         from plugins.mcp.app.utilities.cti_parsing import build_ir_prompt
         prompt = build_ir_prompt("test")
         assert "threat_actors" in prompt
-        assert "malware" in prompt
-        assert "tools" in prompt
+        assert "attack_patterns" in prompt
+        assert "behaviors" in prompt
 
-
-class TestLlmValidationHelpers:
-    def test_parse_json_array_valid(self):
-        from plugins.mcp.app.utilities.cti_llm_validation import _parse_json_array
-        result = _parse_json_array('[{"id": "T1486", "valid": true}]')
-        assert len(result) == 1
-
-    def test_parse_json_array_with_fences(self):
-        from plugins.mcp.app.utilities.cti_llm_validation import _parse_json_array
-        result = _parse_json_array('```json\n[{"test": 1}]\n```')
-        assert result == [{"test": 1}]
-
-    def test_parse_json_array_invalid(self):
-        from plugins.mcp.app.utilities.cti_llm_validation import _parse_json_array
-        assert _parse_json_array("not json") is None
-
-    def test_quote_exists_exact(self):
-        from plugins.mcp.app.utilities.cti_llm_validation import _quote_exists_in_text
-        assert _quote_exists_in_text("encrypts files", "The malware encrypts files on disk.") is True
-
-    def test_quote_exists_fuzzy(self):
-        from plugins.mcp.app.utilities.cti_llm_validation import _quote_exists_in_text
-        # Fuzzy match requires 60% word overlap (3+ char words)
-        assert _quote_exists_in_text("ransomware encrypts files data", "The ransomware encrypts files and data.") is True
-
-    def test_quote_not_exists(self):
-        from plugins.mcp.app.utilities.cti_llm_validation import _quote_exists_in_text
-        assert _quote_exists_in_text("keylogging capture", "The ransomware encrypts files.") is False
-
-    def test_quote_empty(self):
-        from plugins.mcp.app.utilities.cti_llm_validation import _quote_exists_in_text
-        assert _quote_exists_in_text("", "text") is False
-        assert _quote_exists_in_text("quote", "") is False

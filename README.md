@@ -17,7 +17,7 @@ The plugin is designed to keep the LLM grounded in MCP tools and server-side con
 ## Features
 
 - **Author workflow**: Create CALDERA abilities and adversaries from an operator prompt while using available MCP server tools.
-- **Plan and Execute workflow**: Select or upload CTI/STIX, build an adversary from the observed techniques, run the CALDERA operation against available agents, and summarize detection coverage.
+- **Plan and Execute workflow**: Select or upload CTI/STIX, build an adversary from the observed techniques, run the CALDERA operation against available agents, and report which techniques it covered.
 - **CTI ingest pipeline**: Upload raw CTI in HTML, PDF, plaintext, or Markdown and produce STIX 2.1 bundles for retrieval and planning.
 - **STIX selection for planning**: Pick generated STIX bundles from the Plan and Execute workspace. Selecting STIX automatically enables CTI retrieval for that run.
 - **Model and CTI/RAG profiles**: Configure the chat model, API base, API key, temperature, token budget, and tool-call budget. CTI/RAG can use the chat model by default or a saved profile when it needs a different endpoint.
@@ -68,9 +68,45 @@ The CTI ingest workflow stages raw CTI files, runs extraction, and displays gene
 
 <br>
 
-### CTI Pipeline Fidelity
+### What the pipeline produces
 
-The CTI pipeline extracts structure from STIX and related observables, including hosts, identities, user accounts, domains, software, ATT&CK platform hints, and CVE references. These become CALDERA facts so an operation runs against values the report actually named, not placeholders.
+A threat report tells you **what** to run. Your environment tells you **where**.
+
+The pipeline extracts ATT&CK techniques, the named threat actor, and file
+hash observables, and nothing else. It does not extract hosts, accounts, domains, services or
+software, and does not turn them into CALDERA facts. Those describe the
+report's victim, not your estate; CALDERA discovers facts about your hosts
+at runtime, which is why the abilities that use them carry `has_agent_copy`
+and `no_backwards_movement` requirements.
+
+The one insertion point into core CALDERA is the adversary profile:
+
+```
+upload report(s) -> clean -> IR -> ATT&CK techniques -> STIX bundle
+                                                            |
+  "build an adversary from this and run it"                 v
+      build_adversary   attack-pattern -> ability.technique_id -> Adversary
+                        + unmatched_techniques + platform_excluded
+      run_operation     Adversary + your agents + runtime-discovered facts
+```
+
+### Known limits
+
+- **Extraction quality.** Scored against the committed measuring stick with
+  `tests/test_pipeline_score.py`: precision 0.83, F1 0.89. That fixture names
+  its technique ids explicitly, so its recall is an upper bound, not a field
+  estimate. Recall on prose-only reports is materially lower, and fusing
+  several reports on the same actor is the cheapest way to raise it.
+- **No detection scoring.** The `detections` plugin does not ship in this
+  repository, so nothing here scores an operation against SIEM rules.
+- **Platform matching is coarse.** `build_adversary` knows which platforms
+  your agents run, not whether a Windows agent is domain-joined. It reports
+  the gap in `platform_excluded` rather than closing it.
+- **Fusion does not check identity.** Fusing bundles for two different
+  actors merges them into one profile without complaint.
+- **Operations are not agent-scoped.** `run_operation` runs against the whole
+  `red` group; the `agent_paws` argument is not honoured by core's operation
+  schema.
 
 ## Installation
 
@@ -79,7 +115,7 @@ Install MCP like a standard CALDERA plugin.
 1. Clone or copy this repository into the CALDERA plugin directory:
 
 ```bash
-git clone https://gitlab.mitre.org/caldera/caldera-mcp.git plugins/mcp
+git clone https://github.com/mitre/mcp.git plugins/mcp
 ```
 
 2. Add `mcp` to your CALDERA plugin list in `conf/local.yml`. Keep local configuration in `conf/local.yml`; do not commit that file.
@@ -92,25 +128,39 @@ plugins:
   - mcp
 ```
 
-3. Optional integrations can be enabled by adding their plugins as well:
-
-```yaml
-plugins:
-  - magma
-  - sandcat
-  - stockpile
-  - detections
-  - mcp
-```
-
-4. Install plugin requirements from the CALDERA virtual environment:
+3. Install plugin requirements from the CALDERA virtual environment:
 
 ```bash
 source venv/bin/activate
 pip install -r plugins/mcp/requirements.txt
 ```
 
-5. Copy `.env.example` to `.env` and set the LLM endpoint and credential. Both are required; nothing ships in `conf/default.yml`.
+4. Install the spaCy model. pip cannot do this from `requirements.txt`:
+
+```bash
+python -m spacy download en_core_web_lg
+```
+
+   Install poppler as well, which supplies `pdftotext`. Without it the
+   pipeline still ingests TXT, MD and HTML, and PDF uploads report the
+   missing dependency rather than failing silently:
+
+```bash
+brew install poppler          # macOS
+apt install poppler-utils     # Debian/Ubuntu
+```
+
+   To run the test suite, also install the dev requirements:
+
+```bash
+pip install -r plugins/mcp/requirements-dev.txt
+```
+
+5. Copy `.env.example` to `.env` and set the LLM endpoint and credential.
+   Both are optional: with neither set, IR extraction falls back to a
+   deterministic offline extractor. That extractor trades roughly 15 to 20
+   percent of recall for sub-second processing, so configure a model when
+   extraction quality matters.
 
 ```bash
 cp plugins/mcp/.env.example plugins/mcp/.env
@@ -164,12 +214,14 @@ Use Upload CTI to stage raw reports, run CTI extraction, and produce STIX 2.1 bu
 Use Plan and Execute for CTI-driven operations. The workflow can:
 
 - Read selected STIX bundles and CTI/RAG context.
-- Extract hosts, operating systems, domains, users, and software.
-- Turn those into a CALDERA fact source so operations run on values the report named.
-- Build and run the CALDERA operation.
-- Summarize operator-review gaps and detection coverage.
+- Fuse several bundles describing the same actor into one.
+- Build an adversary from the observed techniques, previewing it first.
+- Run the CALDERA operation against agents that have checked in.
+- Report which techniques had no matching ability, and which had one that
+  no live agent can run.
 
-The workflow should report missing evidence rather than inventing hosts, users, domains, or services.
+The CTI names techniques, not your estate. The workflow reports a gap
+rather than answering a question about your environment from a report.
 
 ## Configuration
 
@@ -184,28 +236,32 @@ MCP supports saved endpoint profiles in the UI. Profiles can carry:
 - Maximum tool calls
 - Maximum tokens
 
-CTI/RAG model settings can use the chat endpoint by default or a separate saved profile when CTI extraction benefits from a different model.
+CTI and RAG share the chat endpoint. Extraction differs from chat only in its generation settings, which the CTI Extraction Model panel edits.
 
 ### Local Settings
 
 Prefer environment variables for local values, and keep `conf/default.yml` limited to safe defaults.
 
-To pin values on disk instead, set them in `conf/local.yml`. That file is overlaid onto `conf/default.yml` key by key, so it only needs the keys it changes.
-
-The `llm` block sits at the top level of the file:
+To pin values on disk instead, create `conf/local.yml`. That file is a **sparse overlay**, not a full config: it is deep-merged onto `conf/default.yml` key by key, so it needs only the keys it changes. A file containing one key is valid and complete.
 
 ```yaml
 llm:
   model: openai/gpt-oss-120b
   api_base: https://api.example.com/v1
-  api_base_env: MCP_LLM_API_BASE
-  api_key_env: MCP_LLM_API_KEY
-  temperature: 0.5
-  max_tool_calls: 5
-  max_tokens: 24000
+  offline: false
+
+cti:
+  timeout: 120
+  offline: false
 ```
 
-A value set here outranks the environment variable named beside it, so leave `api_base` empty to keep resolving it from `MCP_LLM_API_BASE`. The `cti` block takes the same shape and may name a different variable if CTI extraction should reach a separate endpoint.
+Three rules that are easy to trip over:
+
+- **`cti` layers over `llm`, but only for its own generation settings.** A workload profile may set `top_p`, `timeout`, `stream`, `offline` and `embed_model`. Everything else belongs to `llm`: the connection (`provider`, `model`, `api_base`, credentials, `ssl_verify`), and `temperature` and `max_tokens`, which two panels display and so are stored once. Anything else under `cti` is dropped and logged, and `set_config` rejects it outright.
+- **Precedence differs by field.** `api_key` resolves environment-first and is never read from this file. `api_base` resolves yaml-first, so a value here beats `MCP_LLM_API_BASE`; leave it empty to keep using the variable.
+- **A key with no value is `null`, and null overrides.** A bare `llm:` heading wipes the shipped block rather than falling through to it. Omit the block instead.
+
+The GUI's **Global Model Config** panel writes the connection to the `llm` profile in `conf/local.yml`, so it configures every workload including CTI extraction. Only fields you change are written, so a value still coming from `MCP_LLM_API_BASE` is left alone rather than pinned to disk. The API key is the exception: it stays in `localStorage` and rides each request, and `set_config` strips credentials before writing.
 
 ## API Surface
 
@@ -219,6 +275,10 @@ The plugin exposes MCP workflow APIs through CALDERA's aiohttp server. The UI us
 - List generated STIX bundles.
 - Run CTI pipeline steps.
 - Read run history and transcripts.
+
+The CTI pipeline MCP server exposes five tools: `cti_pipeline_ingest_cti`,
+`cti_pipeline_fuse`, `cti_pipeline_build_adversary`,
+`cti_pipeline_run_operation` and `cti_pipeline_wait_for_agents`.
 
 When adding new UI functionality, prefer extending the existing MCP API routes instead of creating separate side channels.
 

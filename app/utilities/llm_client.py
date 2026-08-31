@@ -4,7 +4,7 @@ llm_client.py — Centralized, deterministic LLM access layer
 Responsibilities:
 - Load effective MCP config (local.yml → default.yml)
 - Provide a single async LLM client
-- Support offline + mock modes
+- Support offline mode
 - Expose deterministic provenance for STIX / CTI artifacts
 """
 
@@ -13,62 +13,53 @@ import os
 import ssl
 import aiohttp
 import yaml
-import dspy
-from pathlib import Path
 from functools import lru_cache
 from urllib.parse import urlsplit, urlunsplit
 
 from plugins.mcp.app.dspy_env import (
     apply_litellm_ssl_verify,
     coerce_optional_bool,
-    dspy_lm_kwargs_from_settings,
 )
 from plugins.mcp.app.utilities.paths import get_mcp_root
 
-def init_mlflow(profile: str):
-    """
-    Initialize MLflow deterministically from config.
-    Safe to call multiple times.
-    Must only be called at runtime (never import-time).
-    """
-    import mlflow
-    import dspy
-    cfg = load_config()
-    mlflow_cfg = cfg.get("mlflow", {})
-
-    if not mlflow_cfg.get("enabled", False):
-        return
-
-    tracking_uri = mlflow_cfg.get("tracking_uri")
-    if tracking_uri:
-        mlflow.set_tracking_uri(tracking_uri)
-
-    experiment_cfg = mlflow_cfg.get("experiment", {})
-    experiment_name = experiment_cfg.get(profile)
-    if experiment_name:
-        mlflow.set_experiment(experiment_name)
-
-    autolog_cfg = mlflow_cfg.get("autolog", {})
-    # DSPy autolog is NOT safe in async / multi-task execution.
-    # DSPy must be controlled via dspy.context() only.
-    if autolog_cfg.get("dspy", False):
-        logging.getLogger("plugins.mcp").warning(
-            "[MCP] mlflow.dspy.autolog() is disabled (unsafe with async tasks)"
-        )
 
 # ------------------------------------------------------
 # Config loader (local, explicit, deterministic)
 # ------------------------------------------------------
 
-def _deep_merge(base: dict, override: dict) -> dict:
-    """Overlay override onto base, recursing into nested dicts."""
+def deep_merge(base: dict, override: dict) -> dict:
+    """Overlay override onto base, recursing into nested dicts.
+
+    Public because set_config needs the same semantics local.yml already uses
+    when it overlays default.yml.
+    """
     merged = dict(base)
     for key, value in (override or {}).items():
         if isinstance(value, dict) and isinstance(merged.get(key), dict):
-            merged[key] = _deep_merge(merged[key], value)
+            merged[key] = deep_merge(merged[key], value)
         else:
             merged[key] = value
     return merged
+
+
+# get_config returns the raw file alongside a server-resolved view, so a
+# GET-edit-POST round trip carries both. Only 'config' is the payload.
+_ENVELOPE_SIBLINGS = frozenset({"config", "resolved"})
+
+
+def unwrap_config_envelope(local: dict) -> dict:
+    """get_config returns {"config": cfg}, so a GET-edit-POST round trip used
+    to persist that envelope as a literal `config:` root the overlay ignored.
+
+    The response grew a sibling 'resolved' key, which made the exact-key-set
+    test below fail, so a round trip stopped being recognised as an envelope:
+    it wrote two inert top-level sections and slipped past the per-section
+    validation that set_config applies to the unwrapped form.
+    """
+    inner = local.get("config")
+    if isinstance(inner, dict) and set(local) <= _ENVELOPE_SIBLINGS:
+        return inner
+    return local
 
 
 @lru_cache(maxsize=1)
@@ -89,17 +80,26 @@ def load_config() -> dict:
     if default_path.exists():
         with default_path.open("r", encoding="utf-8") as f:
             config = yaml.safe_load(f) or {}
+
     if local_path.exists():
         with local_path.open("r", encoding="utf-8") as f:
-            config = _deep_merge(config, yaml.safe_load(f) or {})
+            config = deep_merge(config, unwrap_config_envelope(yaml.safe_load(f) or {}))
 
     if not config:
         raise FileNotFoundError("No config found (default.yml or local.yml)")
     return config
 
 def reload_config():
-    """Force reload MCP config from disk."""
+    """Force reload MCP config from disk.
+
+    Also drops the LLMClient singleton. It snapshots the config at
+    construction, so without this a Save reached get_llm_provenance, which
+    reads fresh, but not generate(), which reads the snapshot: the bundle got
+    stamped with a model that did not produce it.
+    """
+    global _llm_client
     load_config.cache_clear()
+    _llm_client = None
     return load_config()
 
 
@@ -170,6 +170,89 @@ def _aiohttp_ssl_arg(ssl_verify):
 # Provenance (Stage 2 / STIX support)
 # ------------------------------------------------------
 
+# What a workload profile is allowed to differ on. Everything else, above all
+# the endpoint and the credentials, belongs to 'llm' and to 'llm' only.
+#
+# This used to be an unrestricted merge, so any key under cti won. A model
+# pinned there beat the global one with nothing in the UI to show it, and the
+# panel that wrote those keys put them there by accident. One endpoint, one
+# model, and per-workload generation settings is the whole model now.
+# The LLM profiles. conf/local.yml also holds unrelated sections such as
+# 'caldera' and 'mlflow', and the allowlist below must not be applied to those.
+LLM_PROFILES = frozenset({"llm", "cti"})
+
+# temperature and max_tokens are deliberately NOT here. They are displayed and
+# edited by two panels, and two stored copies drift: the CTI panel showed 0 and
+# 8192 while the global panel showed 0.5 and 24000, with nothing to say which
+# one a run would use. They live on 'llm' so there is one value to disagree
+# about.
+# What the 'llm' profile itself accepts over the API. Anything not here is
+# either meaningless or belongs in .env, and set_config used to take any key
+# in this section at all.
+LLM_OVERRIDABLE = frozenset({
+    "provider", "model", "api_base", "api_base_env", "api_key_env",
+    "ssl_verify", "offline", "temperature", "top_p", "max_tokens",
+    "max_tool_calls", "timeout", "stream", "embed_model",
+    "rag_topk", "rag_embed_model",
+})
+
+WORKLOAD_OVERRIDABLE = frozenset({
+    "top_p",
+    # Extraction legitimately waits longer than an interactive chat turn.
+    "timeout",
+    "stream",
+    # Per-workload run mode: extraction can go offline without silencing chat.
+    "offline",
+    # A different embedding model is a separate axis from the chat endpoint,
+    # so it cannot be confused with one.
+    "embed_model",
+})
+
+
+def layered_profile(cfg: dict, profile: str) -> dict:
+    """Resolve a workload profile over the global 'llm' profile.
+
+    'llm' owns the connection: provider, model, api_base, credentials and TLS.
+    A workload profile such as 'cti' may only adjust generation settings.
+    Anything else it declares is ignored and logged, because silently honouring
+    it is how extraction ended up on a different endpoint from everything else.
+    """
+    raw = (cfg or {}).get(profile) or {}
+    if profile == "llm":
+        return raw
+
+    glob = (cfg or {}).get("llm") or {}
+
+    # An absent or empty workload profile inherits outright. Returning {} here
+    # meant a deployment that deleted its cti block got "No LLM profile 'cti'"
+    # rather than the global connection the UI promises it shares.
+    if not raw:
+        return dict(glob)
+
+    # A key present but empty (a cleared number input sends '', a bare
+    # 'timeout:' parses as None) must fall through to the global value rather
+    # than override it with nothing. timeout=None means no timeout at all.
+    allowed = {
+        k: v for k, v in raw.items()
+        if k in WORKLOAD_OVERRIDABLE and v is not None and v != ""
+    }
+    # Only warn about a dropped key that would actually have changed something.
+    # A key the loader already promoted onto 'llm' now holds the same value, so
+    # reporting it as ignored contradicts the promotion notice.
+    ignored = sorted(
+        k for k in set(raw) - set(allowed)
+        if not (k in WORKLOAD_OVERRIDABLE and (raw[k] is None or raw[k] == ""))
+        and raw[k] != glob.get(k)
+    )
+    if ignored:
+        logging.getLogger("plugins.mcp").warning(
+            "[MCP] %s: ignoring %s. These are set once on the 'llm' profile; "
+            "remove them from conf/local.yml.",
+            profile, ", ".join(ignored),
+        )
+    return {**glob, **allowed}
+
+
 def get_llm_provenance(profile: str = "llm", *, runtime: bool = False) -> dict:
     """
     Provenance metadata for logging + deterministic audit.
@@ -177,13 +260,12 @@ def get_llm_provenance(profile: str = "llm", *, runtime: bool = False) -> dict:
     If runtime=True, include runtime fields required to execute (api_key, api_base).
     Keep runtime=False as safe-to-log (no secrets).
     """
-    llm = resolve_env_indirection(load_config().get(profile, {}) or {})
+    llm = resolve_env_indirection(layered_profile(load_config(), profile))
 
     base = {
         "provider": llm["provider"],
         "model": llm.get("model"),
         "offline": llm.get("offline", False),
-        "use_mock": llm.get("use_mock", False),
         "temperature": llm.get("temperature"),
         "top_p": llm.get("top_p"),
         "max_tokens": llm.get("max_tokens"),
@@ -208,31 +290,52 @@ def get_llm_provenance(profile: str = "llm", *, runtime: bool = False) -> dict:
 
     return base
 
-def build_dspy_lm(profile: str = "llm") -> dspy.LM:
-    """
-    Build a DSPy LM instance from MCP config.
-    Must only be called at runtime.
-    """
-    llm_rt = get_llm_provenance(profile, runtime=True)
-
-    # Deterministic early exit
-    if llm_rt.get("offline") or llm_rt.get("use_mock"):
-        raise RuntimeError(f"LLM profile '{profile}' is offline/mock; cannot build DSPy LM")
-
-    kwargs = dspy_lm_kwargs_from_settings(llm_rt)
-
-    return dspy.LM(**kwargs)
 
 # ------------------------------------------------------
 # Central LLM Client
 # ------------------------------------------------------
+
+class LLMHTTPError(RuntimeError):
+    """A non-200 from the provider, with the status kept for the caller.
+
+    Callers need to tell a misconfiguration apart from a blip: the raw body is
+    provider JSON and says nothing about where the setting lives.
+    """
+
+    def __init__(self, status: int, model: str, body: str):
+        self.status = status
+        self.model = model
+        self.body = body
+        super().__init__(self._explain())
+
+    def _explain(self) -> str:
+        b = (self.body or "").lower()
+        if "does not exist" in b or "not available for inference" in b:
+            return (
+                f"Model not available: the provider has no {self.model}. Set a "
+                f"model it serves in Global Model Config, or in llm.model in "
+                f"conf/local.yml."
+            )
+        if "at capacity" in b:
+            return (f"Model busy: the provider has no free slot for "
+                    f"{self.model}. Retry, or pick another model.")
+        if self.status in (401, 403):
+            return ("LLM authentication failed: the provider rejected the API "
+                    "key. Check MCP_LLM_API_KEY in plugins/mcp/.env.")
+        return f"LLM HTTP {self.status} for {self.model}: {self.body[:200]}"
+
+    @property
+    def is_transient(self) -> bool:
+        """Retryable or load related, as opposed to a wrong setting."""
+        return self.status == 429 or self.status >= 500 or "at capacity" in (self.body or "").lower()
+
 
 class LLMClient:
     """
     Central async LLM client.
 
     Guarantees:
-    - No calls when offline or mock enabled
+    - No calls when offline
     - Provider routing by config only
     - No hard dependency on OpenAI SDKs
     """
@@ -241,13 +344,13 @@ class LLMClient:
         self.cfg = load_config()
 
     async def generate(self, prompt: str, profile: str = "llm") -> str | None:
-        raw_cfg = self.cfg.get(profile, {})
+        raw_cfg = layered_profile(self.cfg, profile)
         if not raw_cfg:
             raise KeyError(f"No LLM profile '{profile}' in config")
 
         # Deterministic early exit, before credential resolution: an
         # offline profile may legitimately carry no key and no base.
-        if raw_cfg.get("offline") or raw_cfg.get("use_mock"):
+        if raw_cfg.get("offline"):
             return None
 
         llm_cfg = resolve_env_indirection(raw_cfg)
@@ -323,6 +426,11 @@ class LLMClient:
             "temperature": temperature,
             "max_tokens": llm_cfg.get("max_tokens", 1024),
         }
+        # Provenance stamps top_p into every bundle, so it has to actually be
+        # sent or the bundle documents a setting that never applied.
+        top_p = llm_cfg.get("top_p")
+        if top_p is not None:
+            payload["top_p"] = top_p
 
         timeout = aiohttp.ClientTimeout(total=llm_cfg.get("timeout", 60))
         ssl_arg = _aiohttp_ssl_arg(llm_cfg.get("ssl_verify", True))
@@ -336,7 +444,7 @@ class LLMClient:
             ) as resp:
                 if resp.status != 200:
                     text = await resp.text()
-                    raise RuntimeError(f"LLM HTTP {resp.status}: {text}")
+                    raise LLMHTTPError(resp.status, model, text)
 
                 data = await resp.json()
                 choices = data.get("choices", [])
