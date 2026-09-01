@@ -30,8 +30,14 @@
         <p v-if="message.errorMessage" class="mt-1">{{ message.errorMessage }}</p>
       </div>
 
-      <!-- Assistant: finished -->
-      <div v-else class="assistant-body">
+      <!-- Assistant: cancelled before it produced a result -->
+      <div v-else-if="message.status === 'KILLED'" class="stopped-text">
+        <strong>Run stopped.</strong>
+        <p class="mt-1">{{ message.errorMessage || STOPPED_NOTE }}</p>
+      </div>
+
+      <!-- Assistant: delivered an answer -->
+      <div v-else-if="isDelivered" class="assistant-body">
         <div
           v-if="formattedResult"
           class="result-content"
@@ -39,6 +45,9 @@
         ></div>
         <p v-else class="muted">No result returned.</p>
       </div>
+
+      <!-- Assistant: an undelivered status with no branch of its own -->
+      <p v-else class="muted">No result returned.</p>
 
       <!-- Thoughts panel for assistant messages with trajectory data -->
       <ChatThoughts
@@ -57,6 +66,7 @@
 <script setup>
 import { computed } from 'vue'
 import { formatProcessResult } from '../format_result.js'
+import { isDeliveredResponse } from './messageState.js'
 import ChatLoadingState from './ChatLoadingState.vue'
 import ChatThoughts from './ChatThoughts.vue'
 
@@ -68,7 +78,13 @@ const props = defineProps({
   isInjectedSentence: { type: Function, default: () => false },
 })
 
+// Fallback for a stopped bubble whose cache entry aged out before the page
+// read the reason.
+const STOPPED_NOTE = 'Anything already created in CALDERA stays.'
+
 const role = computed(() => props.message.role || 'assistant')
+// Shared with the header's response count so the two cannot disagree.
+const isDelivered = computed(() => isDeliveredResponse(props.message))
 const formattedResult = computed(() => formatProcessResult(props.message.finalResult || ''))
 
 const formattedTime = computed(() => {
@@ -138,6 +154,13 @@ const formattedTime = computed(() => {
   color: #ffb3b3;
   background-color: rgba(255, 80, 80, 0.08);
   border-left: 3px solid #ff6464;
+  padding: 0.7rem 0.9rem;
+  border-radius: 4px;
+}
+.stopped-text {
+  color: #ffe0b8;
+  background-color: rgba(245, 158, 11, 0.08);
+  border-left: 3px solid #f59e0b;
   padding: 0.7rem 0.9rem;
   border-radius: 4px;
 }

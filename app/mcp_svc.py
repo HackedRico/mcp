@@ -4,6 +4,7 @@ import logging
 import os
 import re
 import tempfile
+import traceback
 from pathlib import Path
 from app.utility.base_service import BaseService
 import asyncio
@@ -12,7 +13,9 @@ from plugins.mcp.app.config import resolve_llm_config
 from plugins.mcp.app.mlflow_run import (
     RunTracker,
     reconcile_orphaned_runs as _reconcile_orphaned_runs,
+    register_stage_observer,
     summarize_exception,
+    unregister_stage_observer,
 )
 
 
@@ -67,6 +70,15 @@ _RUN_CACHE_LIMIT = 256
 _SESSION_CACHE_LIMIT = 64
 _SESSION_TURN_CAP = 8
 
+# Shown on a run that was cancelled. Cancelling unwinds our own task; it
+# cannot undo the CALDERA writes the agent already made.
+_CANCELLED_BY_USER = (
+    "Anything already created in CALDERA stays, including a running operation."
+)
+_CANCELLED_BY_SERVER = (
+    "The server shut down. Anything already created in CALDERA stays."
+)
+
 
 class MCPService(BaseService):
     def __init__(self, services, server_registry=None, workflow_registry=None, capability_registry=None):
@@ -87,6 +99,16 @@ class MCPService(BaseService):
         #    trajectory, error?}
         # OrderedDict gives us O(1) LRU eviction without an extra dependency.
         self._runs: "collections.OrderedDict[str, dict]" = collections.OrderedDict()
+
+        # Live task handles, so a cancel request can name a running workflow.
+        # Kept out of self._runs, which evicts at _RUN_CACHE_LIMIT while long
+        # runs are still executing.
+        self._tasks: dict[str, asyncio.Task] = {}
+
+        # Runs we asked to stop. anyio can repackage a cancel that lands during
+        # MCP session startup as an ExceptionGroup, so the intent is recorded
+        # here rather than inferred from the exception type.
+        self._cancelling: set[str] = set()
 
         # Per-session chat history for workflows whose registration sets
         # supports_chat_history=True. session_id -> list of
@@ -118,6 +140,77 @@ class MCPService(BaseService):
         self._runs.move_to_end(run_id)
         while len(self._runs) > _RUN_CACHE_LIMIT:
             self._runs.popitem(last=False)
+
+    def _update_stage(self, run_id: str, stage: str) -> None:
+        """Mirror a workflow's stage tag into the polled snapshot.
+
+        Workflows report progress with tracker.set_tag("stage", ...), which
+        reaches MLflow only. /status serves this cache, so without the
+        mirror the chat UI shows "initializing" for the whole run. Guarded
+        on RUNNING so a late tag cannot overwrite a terminal stage.
+        """
+        snapshot = self._runs.get(run_id)
+        if snapshot is not None and snapshot.get("status") == "RUNNING":
+            snapshot["stage"] = stage
+
+    def cancel_run(self, run_id: str) -> bool:
+        """Ask the task owning ``run_id`` to stop.
+
+        False when no live task owns it: already finished, never started, or
+        from a previous process. Cancelling is by run id, so one run stopping
+        never touches another, and a repeat press is a no-op.
+        """
+        task = self._tasks.get(run_id)
+        if task is None or task.done():
+            return False
+        self._cancelling.add(run_id)
+        task.cancel()
+        return True
+
+    def _on_task_done(self, task: asyncio.Task, run_id: str, workflow_id: str,
+                      session_id: str, prompt: str) -> None:
+        """Drop a finished run's handle, and close out one that never ran.
+
+        A task cancelled before its body was scheduled leaves no cache
+        snapshot and an MLflow run stuck on RUNNING, which is the state this
+        whole feature exists to avoid. Runs after the task, so it also clears
+        a cancel that raced the run's last await.
+        """
+        self._tasks.pop(run_id, None)
+        if task.cancelled() and self.get_run(run_id) is None:
+            tracker = RunTracker(run_id)
+            self._record_cancelled_run(
+                run_id, tracker, workflow_id, session_id, prompt
+            )
+            tracker.terminate("KILLED")
+        self._cancelling.discard(run_id)
+
+    def _record_cancelled_run(self, run_id: str, tracker, workflow_id: str,
+                              session_id: str, prompt: str) -> None:
+        """Mark a cancelled run in both the cache and MLflow.
+
+        Only a cancel this service asked for is the user's. Everything else
+        is the event loop tearing down in-flight tasks at shutdown, and
+        History must not report that as somebody pressing Stop.
+        """
+        by_user = run_id in self._cancelling
+        self.log.info(
+            f"[MCP] Run {run_id} cancelled by {'user' if by_user else 'server'}"
+        )
+        tracker.set_tag("stage", "stopped by user" if by_user else "cancelled")
+        tracker.set_tag("status", "cancelled")
+        tracker.set_tag("mcp.cancelled", "user" if by_user else "server")
+        self._record_run(run_id, {
+            "status": "KILLED",
+            "stage": "stopped by user" if by_user else "cancelled",
+            "workflow_id": workflow_id,
+            "session_id": session_id,
+            "prompt": prompt,
+            "process_result": "",
+            "reasoning": "",
+            "trajectory": {},
+            "error": _CANCELLED_BY_USER if by_user else _CANCELLED_BY_SERVER,
+        })
 
     async def reconcile_orphaned_runs(self) -> list:
         """Terminate MLflow runs left RUNNING by a process that died.
@@ -396,7 +489,7 @@ class MCPService(BaseService):
         # MLflow can group their (single-turn) sessions consistently.
         resolved_session_id = session_id or run_id
 
-        asyncio.create_task(self._run_execution(
+        task = asyncio.create_task(self._run_execution(
             workflow=workflow,
             prompt=prompt,
             run_id=run_id,
@@ -407,6 +500,10 @@ class MCPService(BaseService):
             capability_settings=cap_settings,
             workflow_context=workflow_context if isinstance(workflow_context, dict) else {},
             disable_history=disable_history,
+        ))
+        self._tasks[run_id] = task
+        task.add_done_callback(lambda t, rid=run_id: self._on_task_done(
+            t, rid, workflow.id, resolved_session_id, prompt
         ))
         return {
             "run_id": run_id,
@@ -469,6 +566,10 @@ class MCPService(BaseService):
         tracker = RunTracker(run_id)
         terminal_status = "FAILED"
         try:
+            # Every tracker bound to this run mirrors its stage tags into
+            # the snapshot /status serves, including the one the workflow
+            # binds. Inside the try so the finally always releases it.
+            register_stage_observer(run_id, lambda v: self._update_stage(run_id, v))
             tracker.set_tag("stage", "initializing")
             tracker.set_tag("workflow_id", workflow.id)
             tracker.set_tag("mcp.session_id", effective_session_id)
@@ -567,12 +668,42 @@ class MCPService(BaseService):
                     effective_session_id, prompt, process_result
                 )
 
-        except Exception as e:
+        except asyncio.CancelledError:
+            terminal_status = "KILLED"
+            self._record_cancelled_run(
+                run_id, tracker, workflow.id, effective_session_id, prompt
+            )
+            raise
+
+        except BaseException as e:
+            if run_id in self._cancelling:
+                # anyio hands a cancel that lands during MCP session startup
+                # back wrapped in an exception group, so the type proves
+                # nothing; the recorded intent does. Re-raising as cancelled
+                # also stops asyncio logging the wrapper as unretrieved.
+                terminal_status = "KILLED"
+                self._record_cancelled_run(
+                    run_id, tracker, workflow.id, effective_session_id, prompt
+                )
+                raise asyncio.CancelledError from None
+            if not isinstance(e, Exception):
+                # KeyboardInterrupt and friends are not this run's failure.
+                raise
+
             error_summary = summarize_exception(e)
-            self.log.error(f"[MCP] Execution failed: {error_summary}")
+            # exc_info because the workflow no longer prints the stack and
+            # the traceback param below is best-effort: a dead tracking
+            # store would otherwise leave one summary line and nothing else.
+            self.log.error(f"[MCP] Execution failed: {error_summary}", exc_info=e)
             tracker.set_tag("stage", "error")
             tracker.set_tag("status", "error")
             tracker.log_param("error", error_summary)
+            # Written here rather than in the workflow: params are immutable,
+            # and this is the only layer that knows a cancel from a crash.
+            tracker.log_param(
+                "traceback",
+                "".join(traceback.format_exception(type(e), e, e.__traceback__)),
+            )
             self._record_run(run_id, {
                 "status": "FAILED",
                 "stage": "error",
@@ -586,4 +717,5 @@ class MCPService(BaseService):
             })
 
         finally:
+            unregister_stage_observer(run_id)
             tracker.terminate(terminal_status)

@@ -34,17 +34,27 @@
             <font-awesome-icon :icon="backIcon" />
             <span>Back</span>
           </button>
-          <span
+          <button
             v-if="run.isRunning.value"
-            class="header-status running"
-            title="This run continues on the server if you leave the page."
+            class="header-status running run-control"
+            :class="{ 'is-stopping': run.isStopping.value }"
+            :aria-disabled="run.isStopping.value"
+            @click="requestStop"
+            type="button"
+            :title="stopTitle"
           >
-            <span class="status-dot"></span> Working
-          </span>
-          <span v-else-if="messages.length" class="header-status idle">
-            {{ messages.filter(m => m.role === 'assistant').length }} response{{
-              messages.filter(m => m.role === 'assistant').length === 1 ? '' : 's'
-            }}
+            <span class="status-dot"></span>
+            <span>{{ run.isStopping.value ? 'Stopping…' : 'Working' }}</span>
+            <template v-if="!run.isStopping.value">
+              <span class="badge-sep" aria-hidden="true">·</span>
+              <span class="badge-stop">
+                <font-awesome-icon :icon="stopIcon" />
+                Stop
+              </span>
+            </template>
+          </button>
+          <span v-else-if="responseCount" class="header-status idle">
+            {{ responseCount }} response{{ responseCount === 1 ? '' : 's' }}
           </span>
         </div>
         <div class="header-right">
@@ -67,7 +77,7 @@
             @click="clearTranscript"
             type="button"
             :title="run.isRunning.value
-              ? 'Start a new chat. The run in progress keeps going on the server and stays in the History tab.'
+              ? 'Start a new chat. The run in progress keeps going; stop it from the Working badge, or wait for it to finish.'
               : 'Start a new chat'"
           >
             <font-awesome-icon :icon="plusIcon" />
@@ -108,13 +118,14 @@
 <script setup>
 import { ref, computed, inject, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import { FontAwesomeIcon } from '@fortawesome/vue-fontawesome'
-import { faAngleLeft, faPlus } from '@fortawesome/free-solid-svg-icons'
+import { faAngleLeft, faPlus, faStop } from '@fortawesome/free-solid-svg-icons'
 import ChatSidebar from './ChatSidebar.vue'
 import ChatTranscript from './ChatTranscript.vue'
 import ChatComposer from './ChatComposer.vue'
 import { useMcpRun } from './composables/useMcpRun.js'
 import { useTrajectory } from './composables/useTrajectory.js'
 import { useChatSession } from './composables/useChatSession.js'
+import { isDeliveredResponse } from './messageState.js'
 
 const props = defineProps({
   workflow: { type: Object, default: () => ({}) },
@@ -127,6 +138,7 @@ const globalConfig = inject('mcpGlobalConfig')
 const availableServers = inject('mcpAvailableServers', ref([]))
 const backIcon = faAngleLeft
 const plusIcon = faPlus
+const stopIcon = faStop
 
 // --- Persistent per-workflow chat state -------------------------------------
 // useChatSession owns messages / sessionId / historyEnabled / selectedRag
@@ -240,7 +252,7 @@ watch(
     msg.thoughts = thoughts.value
     msg.adversary = adversary.value
     msg.abilityNames = abilityNames.value
-    if (msg.status === 'FINISHED' || msg.status === 'FAILED') {
+    if (['FINISHED', 'FAILED', 'KILLED'].includes(msg.status)) {
       pendingAssistantId = null
     }
   },
@@ -262,6 +274,25 @@ function _resumeRunInFlight() {
 onBeforeUnmount(run.stop)
 
 // --- Workflow-derived UI bits ----------------------------------------------
+const stopTitle = computed(() =>
+  run.isStopping.value
+    ? 'Stopping. The agent loop takes a few seconds to unwind.'
+    : 'Stop this run. Anything already created in CALDERA stays, including a running operation.'
+)
+
+// The badge is aria-disabled rather than disabled, so the click still
+// arrives while stopping; swallow it here.
+function requestStop() {
+  if (!run.isStopping.value) run.requestStop()
+}
+
+// Same predicate ChatMessage renders by, so the header can never claim a
+// count the transcript disagrees with. A stopped or failed run is not a
+// response; counting one would report a kill as a delivered answer.
+const responseCount = computed(
+  () => messages.value.filter(isDeliveredResponse).length
+)
+
 const examplePrompts = computed(() => props.workflow?.example_prompts || [])
 const composerPlaceholder = computed(() => {
   // The box is closed, but the page is not: say so.
@@ -315,9 +346,14 @@ function handleSubmit() {
 // Back mid-POST would otherwise store a live run with runId null, and the
 // next mount would call it failed.
 function _recordRunHandle(assistantId, resp) {
-  if (resp.session_id && !sessionId.value) sessionId.value = resp.session_id
   const msg = messages.value.find(m => m.id === assistantId)
-  if (msg) msg.runId = resp.run_id || null
+  // Gone means "New chat" wiped the transcript while the POST was out.
+  // The run itself carries on with its id and poller, so the badge can
+  // still stop it; what must not happen is the abandoned run's session_id
+  // being adopted into the chat that replaced it.
+  if (!msg) return
+  if (resp.session_id && !sessionId.value) sessionId.value = resp.session_id
+  msg.runId = resp.run_id || null
   session.persist()
 }
 
@@ -426,7 +462,10 @@ function clearTranscript() {
   // accumulated chat history); single-shot workflows reset the same
   // fields, they just have no semantic meaning for them.
   session.reset()
-  run.reset()
+  // Deliberately NOT reset while a run is live. reset() would clear the
+  // Working badge, which is now the only Stop left once the bubble is gone,
+  // and re-open the composer for a second run this view cannot poll.
+  if (!run.isRunning.value) run.reset()
   pendingAssistantId = null
 }
 </script>
@@ -545,6 +584,31 @@ function clearTranscript() {
   border-radius: 999px;
   border: 1px solid transparent;
 }
+/* Status and action in one pinned element: the badge says a run is live and
+   is also the thing that ends it, so the two can never disagree. */
+.run-control {
+  font-family: inherit;
+  cursor: pointer;
+  transition: color 0.15s ease, background-color 0.15s ease, border-color 0.15s ease;
+}
+.run-control:hover:not(.is-stopping) {
+  color: #ffffff;
+  background-color: rgba(239, 108, 68, 0.22);
+  border-color: #ef6c44;
+}
+.run-control.is-stopping {
+  cursor: default;
+  opacity: 0.75;
+}
+.badge-sep { color: rgba(245, 158, 11, 0.55); }
+.badge-stop {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-weight: 600;
+  color: #ffd7c2;
+}
+.run-control:hover .badge-stop { color: #ffffff; }
 .header-status.running {
   color: #ffe7b8;
   background-color: rgba(245, 158, 11, 0.13);
