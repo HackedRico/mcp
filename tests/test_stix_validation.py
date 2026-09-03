@@ -42,3 +42,26 @@ class TestRenderStixReport:
         assert isinstance(report, str)
         assert len(report) > 0
 
+    def test_sections_match_what_the_pipeline_emits(self, sample_stix_bundle):
+        """Headings for object types no builder produces render a permanent
+        "(none)", which reads as an extraction gap rather than dead code."""
+        from plugins.mcp.app.utilities.cti_stix_report_writer import render_stix_report
+        report = render_stix_report(sample_stix_bundle, "test.json")
+        for heading in ("Threat Actors", "Attack Patterns", "Observed File Hashes"):
+            assert heading in report
+        for heading in ("Malware", "Tools", "Infrastructure", "Relationships"):
+            assert heading not in report
+
+    def test_renders_observed_file_hashes(self):
+        from plugins.mcp.app.utilities.cti_mitre_extract import hashes_to_stix_observed_data
+        from plugins.mcp.app.utilities.cti_stix_builders import make_bundle
+        from plugins.mcp.app.utilities.cti_stix_report_writer import render_stix_report
+
+        digest = "a" * 64
+        bundle = make_bundle(hashes_to_stix_observed_data(
+            [{"hash_type": "SHA-256", "hash": digest, "evidence": "dropped by loader"}]
+        ))
+        report = render_stix_report(bundle, "test.json")
+        assert digest in report
+        assert "SHA-256" in report
+

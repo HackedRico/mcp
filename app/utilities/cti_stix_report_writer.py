@@ -3,10 +3,13 @@ Human-readable STIX bundle report generator.
 Used by Phase 2 to produce <stem>.stix.txt.
 
 The goal is to give analysts a simple overview of:
-- Entities (malware, tools, actors, infra, TTPs)
-- Relationships
+- Entities (threat actors, TTPs, observed file hashes)
 - Object counts
 - Bundle metadata
+
+Sections track what convert_ir_to_stix actually emits. Add one only when a
+builder starts producing that object type, or the report grows headings that
+can never be filled.
 """
 
 import datetime
@@ -21,34 +24,32 @@ def render_section(title: str, lines: list) -> str:
     return "\n".join(out) + "\n"
 
 
+def _hash_lines(observed: dict) -> list:
+    """One line per hash on each SCO the observed-data wraps."""
+    out = []
+    for sco in (observed.get("objects") or {}).values():
+        for algo, digest in (sco.get("hashes") or {}).items():
+            out.append(f"{algo}: {digest}  ({observed.get('id')})")
+    return out
+
+
 def render_stix_report(bundle: dict, ir_name: str) -> str:
     objects = bundle.get("objects", [])
     now = datetime.datetime.now(datetime.UTC).isoformat().replace("+00:00", "Z")
 
-    malware = []
-    tools = []
     actors = []
-    infra = []
     ttp = []
-    rels = []
+    hashes = []
 
     for o in objects:
         t = o.get("type")
 
-        if t == "malware":
-            malware.append(f"{o.get('name')}  ({o.get('id')})")
-        elif t == "tool":
-            tools.append(f"{o.get('name')}  ({o.get('id')})")
-        elif t == "threat-actor":
+        if t == "threat-actor":
             actors.append(f"{o.get('name')}  ({o.get('id')})")
-        elif t == "infrastructure":
-            infra.append(f"{o.get('name')}  ({o.get('id')})")
         elif t == "attack-pattern":
             ttp.append(f"{o.get('name')}  ({o.get('id')})")
-        elif t == "relationship":
-            rels.append(
-                f"{o.get('source_ref')} --[{o.get('relationship_type')}]→ {o.get('target_ref')}"
-            )
+        elif t == "observed-data":
+            hashes.extend(_hash_lines(o))
 
     out = []
     out.append("=" * 72)
@@ -60,12 +61,9 @@ def render_stix_report(bundle: dict, ir_name: str) -> str:
     out.append(f"Total STIX Objects: {len(objects)}")
     out.append("")
 
-    out.append(render_section("Malware", malware))
-    out.append(render_section("Tools", tools))
     out.append(render_section("Threat Actors", actors))
-    out.append(render_section("Infrastructure", infra))
     out.append(render_section("Attack Patterns (TTPs)", ttp))
-    out.append(render_section("Relationships", rels))
+    out.append(render_section("Observed File Hashes", hashes))
 
     out.append("=" * 72)
     out.append("END OF REPORT")
