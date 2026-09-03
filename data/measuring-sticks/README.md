@@ -1,44 +1,52 @@
 # CTI pipeline measuring sticks
 
-Reference STIX bundles that represent **what the MCP CTI pipeline should produce** for well-known threats. These exist to score actual pipeline output — diff them against the bundle the pipeline emits, and the delta is your work list.
+Frozen ground-truth bundles used to score what the MCP CTI pipeline extracts
+from a committed report. They are test fixtures, not generated artifacts: the
+pipeline output is diffed against them and the delta is the work list.
 
-**Hard rule**: every value in these reference bundles must be derivable from an ontology or dictionary (MITRE ATT&CK, MITRE D3fend, STIX 2.1 open vocab, NIST controls). If you'd need a hardcoded lookup table to produce a field, that field doesn't belong in the measuring stick — the pipeline can't be expected to invent it either.
+**Hard rule**: every value here must be derivable from an ontology or
+dictionary (MITRE ATT&CK, MITRE D3fend, STIX 2.1 open vocab, NIST controls).
+If you'd need a hardcoded lookup table to produce a field, that field doesn't
+belong in the measuring stick, because the pipeline can't be expected to
+invent it either.
 
 ## Files
 
-- [`blackcat-expected.stix.json`](blackcat-expected.stix.json) — BlackCat (ALPHV) ransomware. **Auto-derived** from the ATT&CK Evaluations `attackevals-ael/ManagedServices/alphv_blackcat` plan via `plugins/mcp/app/utilities/cti_ae_library_loader.py`. Regenerate with:
+- [`blackcat-expected.stix.json`](blackcat-expected.stix.json): ground truth
+  for [`tests/data/blackcat-sample.txt`](../../tests/data/blackcat-sample.txt).
+  Derived once from the ATT&CK Evaluations
+  `attackevals-ael/ManagedServices/alphv_blackcat` emulation plan, with the
+  provenance recorded in the bundle's `x_cti_config`. Committed as-is and
+  hand-edited from here on: the generator that built it has been removed, and
+  the two libraries it walked were never vendored.
 
-  ```bash
-  python -m plugins.mcp.app.utilities.cti_ae_library_loader \
-    --adversary blackcat \
-    --emit-stix plugins/mcp/data/measuring-sticks/blackcat-expected.stix.json
-  ```
+## What is actually scored
 
-- [`blackcat-expected.handcrafted.stix.json`](blackcat-expected.handcrafted.stix.json) — the original hand-crafted measuring stick, retained so the gap between "what we hand-said" and "what the AE plan actually says" can be diffed.
+Both consumers read exactly one thing from the bundle, the ATT&CK
+`external_id` on each `attack-pattern` object (34 techniques).
 
-## How to use
+- [`tests/test_pipeline_score.py`](../../tests/test_pipeline_score.py) runs
+  stage 1 offline on the sample report and asserts precision, recall and F1
+  stay above their floors. This is the harness that catches an extraction
+  source starting to emit noise.
+- [`tests/test_fusion_recall.py`](../../tests/test_fusion_recall.py) splits
+  the report in half and checks that fusing both halves beats either alone.
 
-```python
-import json, deepdiff
-expected = json.load(open("blackcat-expected.stix.json"))
-actual   = json.load(open("plugins/mcp/data/outputs_stix/<run>.stix.json"))
-diff = deepdiff.DeepDiff(expected, actual, ignore_order=True)
-# Inspect diff — every key in expected that's missing/different in actual is a pipeline gap.
-```
+The bundle also carries `software`, `tool`, `infrastructure`, `user-account`,
+`malware` and `relationship` objects. Nothing reads them, and the pipeline
+cannot produce them: `cti_pipeline_stage2.py` emits only `identity`,
+`threat-actor` and `attack-pattern`. They are retained as a record of what the
+source emulation plan asserted.
 
-## What "complete" means here
+## Adding a stick
 
-Per STIX 2.1 spec ([Infrastructure SDO](https://docs.oasis-open.org/cti/stix/v2.1/os/stix-v2.1-os.html#_jo3k1o6lr9)):
+Write the bundle by hand (or from a report you already have ground truth for),
+commit it alongside its source text under `tests/data/`, and point a test at
+the technique ids. Keep the hard rule above: no field that needs a bespoke
+lookup table to justify it.
 
-Required:
-- `type: "infrastructure"`, `spec_version: "2.1"`, `id`, `created`, `modified`, `name`
+## Scope note
 
-Recommended (the measuring stick fills these):
-- `infrastructure_types` — from STIX open vocab `infrastructure-type-ov`: `amplification | anonymization | botnet | command-and-control | control-system | exfiltration | firewall | hosting-malware | hosting-target-lists | phishing | reconnaissance | routers-switches | staging | unknown | workstation`
-- `description`, `aliases`, `kill_chain_phases`, `first_seen`, `last_seen`
-
-Topology inference was removed: the pipeline no longer emits a per-host
-topology object, and the expected bundles intentionally have none. Hosts,
-accounts and domains named in a report describe the previous victim, so they
-are not turned into CALDERA facts either. CALDERA discovers facts about the
-operator's own estate at runtime.
+Hosts, accounts and domains named in a report describe the previous victim, so
+they are not turned into CALDERA facts, and no per-host topology object is
+emitted. CALDERA discovers facts about the operator's own estate at runtime.

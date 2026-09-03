@@ -14,7 +14,7 @@ PLAN_EXECUTE_DESCRIPTION = (
 
 
 PLAN_EXECUTE_EXAMPLES = [
-    "Create the BlackCat adversary from the selected STIX, run it against my agents, and report coverage.",
+    "Build an adversary from the selected STIX, run it against my agents, and report coverage.",
     "Fuse the selected STIX bundles and tell me which techniques have no matching CALDERA ability.",
     "Convert this raw CTI into STIX 2.1 and identify any operator-review gaps.",
     "Plan an emulation against the Discovery adversary on my available agents.",

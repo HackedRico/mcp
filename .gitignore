@@ -39,9 +39,3 @@ data/stix_bundle.json
 *.db
 *.db-shm
 *.db-wal
-
-# Vendored external CTI / AE-library data — pull on demand, not tracked
-app/utilities/data/external/
-
-# Runtime cache for software-extraction OSV/NVD lookups (offline-safe)
-app/utilities/data/cache/
