@@ -44,30 +44,60 @@ def _headings(report: str) -> list:
     return [line for line in report.splitlines() if line.endswith(":")]
 
 
+def _section(report: str, title: str) -> list:
+    """The body lines under one heading. render_section separates sections with
+    a blank line, so the first one after the heading ends the body."""
+    lines = report.splitlines()
+    start = lines.index(f"{title}:") + 1
+    return [line.strip() for line in lines[start:lines.index("", start)]]
+
+
 class TestRenderStixReport:
     def test_sections_match_what_the_pipeline_emits(self, sample_stix_bundle):
         """A heading for an object type no builder produces renders a permanent
         "(none)", which reads as an extraction gap rather than as dead code. An
-        exact list catches a section added as well as one dropped."""
+        exact list catches a section added as well as one dropped, and the
+        "(none)" check pins the rendering that argument rests on."""
         report = render_stix_report(sample_stix_bundle, "test.json")
         assert _headings(report) == [
             "Threat Actors:",
             "Attack Patterns (TTPs):",
             "Observed File Hashes:",
         ]
+        assert _section(report, "Observed File Hashes") == ["(none)"]
 
-    def test_renders_the_objects_it_was_given(self, sample_stix_bundle):
+    def test_renders_each_object_under_its_own_heading(self, sample_stix_bundle):
+        """Bound to the section rather than to the whole report: both branches of
+        the dispatch loop render byte-identical text, so a swapped append target
+        is invisible to any assertion that only searches the report."""
         report = render_stix_report(sample_stix_bundle, "test.json")
+        headings = {
+            "threat-actor": "Threat Actors",
+            "attack-pattern": "Attack Patterns (TTPs)",
+        }
+
+        expected = {title: [] for title in headings.values()}
         for obj in sample_stix_bundle["objects"]:
-            assert obj["name"] in report
-            assert obj["id"] in report
+            title = headings.get(obj["type"])
+            assert title, f"fixture gained a {obj['type']}; give it a heading here"
+            expected[title].append(f"- {obj['name']}  ({obj['id']})")
 
-    def test_renders_observed_file_hashes(self):
-        """Built through extract_hashes so the rendered algorithm label is the
-        one the pipeline emits, not a hand-picked spelling."""
-        digest = "a" * 64
-        hashes = extract_hashes(f"The dropper, SHA256 {digest}, was written to disk.")
-        assert hashes, "extract_hashes produced nothing to build from"
+        for title, lines in expected.items():
+            assert _section(report, title) == lines
 
-        report = render_stix_report(make_bundle(hashes_to_stix_observed_data(hashes)), "test.json")
-        assert f"{hashes[0]['hash_type']}: {digest}" in report
+    def test_renders_every_observed_file_hash(self):
+        """Two algorithms, built through extract_hashes so the rendered labels are
+        the ones the pipeline emits rather than a hand-picked spelling. A single
+        hash would not catch a writer that stops after the first observed-data."""
+        md5, sha256 = "b" * 32, "a" * 64
+        hashes = extract_hashes(f"Dropper MD5 {md5} wrote a payload, SHA256 {sha256}.")
+        assert len(hashes) == 2, f"expected two hashes, got {hashes}"
+
+        bundle = make_bundle(hashes_to_stix_observed_data(hashes))
+        report = render_stix_report(bundle, "test.json")
+
+        assert sorted(_section(report, "Observed File Hashes")) == sorted(
+            f"- {h['hash_type']}: {h['hash']}  ({observed['id']})"
+            for h, observed in zip(hashes, bundle["objects"])
+        )
+        assert f"Total STIX Objects: {len(bundle['objects'])}" in report
