@@ -55,9 +55,7 @@ registry keys and file extensions. The range's account names sit in the 6
 `user-account` objects, whose `x_cti_evidence` still quotes the plaintext
 credential even where `x_cti_password_provenance` reads `redacted`, and its
 hostnames sit in the 11 `infrastructure` objects. Both types validate, so
-clearing the 26 errors leaves every one of them in place. They are inert here
-because nothing reads them, but strip them before this fixture is copied
-anywhere that is not a test.
+clearing the 26 errors leaves every one of them in place. Nothing reads them.
 
 ## Adding a stick
 
