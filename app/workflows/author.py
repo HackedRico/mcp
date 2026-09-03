@@ -25,6 +25,7 @@ from plugins.mcp.app.dspy_env import (
     dspy_lm_kwargs_from_settings,
 )
 from plugins.mcp.app.dspy_runner import safe_react_acall
+from plugins.mcp.app.workflows.prompts.common import CTI_CONTEXT_DESC
 
 
 def get_env(lm_settings=None):
@@ -120,7 +121,7 @@ class DSPyCalderaFactoryClient(dspy.Signature):
     adversary_emulation_task: str = dspy.InputField()
     process_result: str = dspy.OutputField(desc=_AUTHOR_OUTPUT_DESC)
 
-class DSPyCalderaFactoryClientWithRAG(dspy.Signature):
+class DSPyCalderaFactoryClientWithCTI(dspy.Signature):
     """You are an ability factory for the Caldera adversary emulation platform,
     enhanced with Cyber Threat Intelligence (CTI) data. You have access to MCP
     tool servers that wrap Caldera's core API and any installed plugins. Your
@@ -137,9 +138,7 @@ class DSPyCalderaFactoryClientWithRAG(dspy.Signature):
     """
 
     adversary_emulation_task: str = dspy.InputField()
-    cti_context: str = dspy.InputField(
-        desc="Relevant CTI (Cyber Threat Intelligence) information including attack patterns, techniques, and threat actor behaviors"
-    )
+    cti_context: str = dspy.InputField(desc=CTI_CONTEXT_DESC)
     process_result: str = dspy.OutputField(
         desc=(
             _AUTHOR_OUTPUT_DESC
@@ -150,38 +149,17 @@ class DSPyCalderaFactoryClientWithRAG(dspy.Signature):
     )
 
 
-def format_rag_context(rag_context):
-    """Format RAG context into a string for the DSPy signature."""
-    if not rag_context:
-        return "No CTI context available."
-    
-    formatted_parts = []
-    
-    # Add search results summary
-    if "search_results" in rag_context:
-        formatted_parts.append("Relevant CTI findings:")
-        for i, result in enumerate(rag_context["search_results"][:3], 1):
-            formatted_parts.append(f"{i}. {result}")
-    
-    # Add detailed context
-    if "detailed_context" in rag_context:
-        formatted_parts.append("\nDetailed CTI Information:")
-        for ctx in rag_context["detailed_context"]:
-            formatted_parts.append(f"\n{ctx['name']}:")
-            formatted_parts.append(f"{ctx['description']}")
-    
-    return "\n".join(formatted_parts)
-
-async def run(adversary_emulation_task: str, lm_obj=None, rag_context=None, run_id=None, enabled_servers=None, server_registry=None, cti_context: str = "", **_extra_capability_context):
-    # cti_context (formatted string) is the new orchestrator's path. rag_context
-    # (raw dict) is the legacy mcp_svc shim. Either may be supplied; cti_context
-    # wins. **_extra_capability_context absorbs unknown kwargs from future
-    # capabilities so adding one doesn't break this signature.
+async def run(adversary_emulation_task: str, lm_obj=None, run_id=None, enabled_servers=None, server_registry=None, cti_context: str = "", workflow_context: dict | None = None, denied_tools=None,
+              **_extra_capability_context):
+    # cti_context is the attached intel, already rendered by the cti
+    # capability. **_extra_capability_context absorbs unknown kwargs from
+    # future capabilities so adding one doesn't break this signature.
     #
     # lm_obj is the dict mcp_svc produces from resolve_llm_config (yaml + .env
     # + UI overrides, with fields_locked enforced). Workflows trust it; they
     # do not re-merge yaml here. Tests that call run() directly without
     # lm_obj fall back to the same yaml-resolved defaults.
+    denied = set(denied_tools or ())
     _ensure_mlflow()
     lm_settings = dict(lm_obj) if lm_obj else llm_defaults()
     max_tool_calls = lm_settings.get("max_tool_calls") or 5
@@ -259,6 +237,8 @@ async def run(adversary_emulation_task: str, lm_obj=None, rag_context=None, run_
             for server_name, session in zip(enabled_servers, sessions):
                 tool_list = (await session.list_tools()).tools
                 for tool in tool_list:
+                    if tool.name in denied:
+                        continue
                     if tool.name in seen:
                         raise ValueError(
                             f"Tool name collision: '{tool.name}' defined by both "
@@ -275,22 +255,16 @@ async def run(adversary_emulation_task: str, lm_obj=None, rag_context=None, run_
                 tracker.set_tag("stage", "creating DSPy ReAct instance")
 
                 # Resolve CTI context: prefer the orchestrator-supplied string,
-                # fall back to formatting the legacy structured dict.
                 resolved_cti = cti_context
-                if not resolved_cti and rag_context:
-                    resolved_cti = format_rag_context(rag_context)
 
                 if resolved_cti:
-                    signature = DSPyCalderaFactoryClientWithRAG
+                    signature = DSPyCalderaFactoryClientWithCTI
                     tracker.log_param("cti_context_preview", resolved_cti[:1000])
                     tracker.set_tag("cti_context_length", len(resolved_cti))
-                    if rag_context:
-                        tracker.set_tag("cti_search_results_count", len(rag_context.get("search_results", [])))
-                        tracker.set_tag("cti_detailed_context_count", len(rag_context.get("detailed_context", [])))
                     print(f"[MCP] Passing CTI context to LLM ({len(resolved_cti)} chars)")
 
                     react = dspy.ReAct(signature, tools=dspy_tools, max_iters=max_tool_calls)
-                    tracker.set_tag("stage", "executing DSPy ReAct with RAG")
+                    tracker.set_tag("stage", "executing DSPy ReAct with CTI")
                     result = await safe_react_acall(
                         react,
                         adversary_emulation_task=adversary_emulation_task,
@@ -368,8 +342,18 @@ WORKFLOWS = [
         ),
         signature=DSPyCalderaFactoryClient,
         required_servers=["caldera_core"],
-        optional_servers=[],
-        accepted_capabilities=["rag"],
+        optional_servers=["cti_pipeline"],
+        accepted_capabilities=["cti"],
+        # The signature tells the model not to run operations. caldera_core is
+        # required and cti_pipeline is now offered, and between them they
+        # expose all three of these, so without the scope that instruction is
+        # the only thing standing between an authoring run and a live
+        # operation. Authoring an adversary stays allowed; running one does not.
+        denied_tools=[
+            "core_create_operation",
+            "core_add_link_to_operation",
+            "cti_pipeline_run_operation",
+        ],
         mlflow_experiment=_MLFLOW_EXPERIMENT,
         ui_component="author.vue",
         example_prompts=[
