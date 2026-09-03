@@ -44,11 +44,20 @@ plan asserted.
 
 Two caveats on that residue. `validate_bundle` reports 26 errors against this
 file, because neither `software` (25 objects) nor the custom
-`x-cti-ae-context` (1) is in `ALLOWED_STIX_TYPES`. And `x-cti-ae-context` holds
-the evaluation range's subnets, host paths and account names, which the Scope
-note below says the pipeline does not carry. Nothing reads either type and
-nothing can rebuild them, so both are candidates for deletion whenever someone
-wants the fixture to validate.
+`x-cti-ae-context` (1) is in `ALLOWED_STIX_TYPES`. Nothing reads either type
+and nothing can rebuild them, so both are candidates for deletion whenever
+someone wants the fixture to validate.
+
+The second caveat is that the fixture carries evaluation-range detail the Scope
+note below says the pipeline does not carry, and deleting those two types does
+not remove it. `x-cti-ae-context` holds the range's subnets, file paths,
+registry keys and file extensions. The range's account names sit in the 6
+`user-account` objects, whose `x_cti_evidence` still quotes the plaintext
+credential even where `x_cti_password_provenance` reads `redacted`, and its
+hostnames sit in the 11 `infrastructure` objects. Both types validate, so
+clearing the 26 errors leaves every one of them in place. They are inert here
+because nothing reads them, but strip them before this fixture is copied
+anywhere that is not a test.
 
 ## Adding a stick
 
