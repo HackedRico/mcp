@@ -101,3 +101,31 @@ class TestRenderStixReport:
             for h, observed in zip(hashes, bundle["objects"])
         )
         assert f"Total STIX Objects: {len(bundle['objects'])}" in report
+
+    def test_skips_malformed_observed_data_without_losing_the_rest(self):
+        """The guards in _hash_lines exist so one bad shape costs a line, not the
+        Stage 2 batch: stage 2 writes the bundle to disk before it renders the
+        report, and its per-IR loop catches nothing, so a raise here would abort
+        every remaining IR after the bundles are already written."""
+        digest = "c" * 40
+        good = hashes_to_stix_observed_data(
+            extract_hashes(f"Second stage, SHA1 {digest}, was dropped on the host.")
+        )
+        assert len(good) == 1, f"expected one hash, got {good}"
+
+        malformed = [
+            {"type": "observed-data", "id": "observed-data--objects-missing"},
+            {"type": "observed-data", "id": "observed-data--objects-not-a-dict",
+             "objects": ["0"]},
+            {"type": "observed-data", "id": "observed-data--sco-not-a-dict",
+             "objects": {"0": "file--x"}},
+            {"type": "observed-data", "id": "observed-data--hashes-missing",
+             "objects": {"0": {"type": "file"}}},
+            {"type": "observed-data", "id": "observed-data--hashes-not-a-dict",
+             "objects": {"0": {"type": "file", "hashes": []}}},
+        ]
+
+        report = render_stix_report(make_bundle(malformed + good), "test.json")
+        assert _section(report, "Observed File Hashes") == [
+            f"- SHA1: {digest}  ({good[0]['id']})"
+        ]
