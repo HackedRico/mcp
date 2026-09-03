@@ -431,7 +431,12 @@ def create_windows_ability(
         command_description: Detailed description of the command to use in the windows ability
         tactic: MITRE ATT&CK tactic (e.g., 'privilege-escalation', 'discovery')
         technique_name: Name of the MITRE ATT&CK technique
-        technique_id: Optional MITRE ATT&CK technique ID (e.g., 'T1548.002')
+        technique_id: MITRE ATT&CK technique id (e.g., 'T1548.002'). Optional,
+            but CTI coverage is matched on it: an ability with no id is
+            invisible to cti_pipeline_build_adversary, so a technique you
+            just wrote an ability for still reports as unmatched. Supply it
+            whenever the technique is known, which it is when the id came
+            from cti_context.
         payloads: Optional list of payload files needed
 
     Returns:
@@ -439,10 +444,11 @@ def create_windows_ability(
     """
     ability_id = str(uuid.uuid4())
     created_command = create_command(command_description, "windows")
-    # Create the executor object with default values for optional fields
+    # Caldera keys an executor as (name, platform): name is the runner, platform
+    # is the OS. Transposed, no agent ever matches and the ability cannot run.
     executor = {
-        "name": "windows",
-        "platform": "psh",
+        "name": "psh",
+        "platform": "windows",
         "command": created_command,
         "code": None,
         "language": None,
@@ -497,7 +503,12 @@ def create_linux_ability(
         command_description: Detailed description of the command to use in the linux ability
         tactic: MITRE ATT&CK tactic (e.g., 'privilege-escalation', 'discovery')
         technique_name: Name of the MITRE ATT&CK technique
-        technique_id: Optional MITRE ATT&CK technique ID (e.g., 'T1548.002')
+        technique_id: MITRE ATT&CK technique id (e.g., 'T1548.002'). Optional,
+            but CTI coverage is matched on it: an ability with no id is
+            invisible to cti_pipeline_build_adversary, so a technique you
+            just wrote an ability for still reports as unmatched. Supply it
+            whenever the technique is known, which it is when the id came
+            from cti_context.
         payloads: Optional list of payload files needed
 
     Returns:
@@ -506,10 +517,11 @@ def create_linux_ability(
     ability_id = str(uuid.uuid4())
     created_command = create_command(command_description, "linux")
 
-    # Create the executor object with default values for optional fields
+    # Caldera keys an executor as (name, platform): name is the runner, platform
+    # is the OS. Transposed, no agent ever matches and the ability cannot run.
     executor = {
-        "name": "linux",
-        "platform": "sh",
+        "name": "sh",
+        "platform": "linux",
         "command": created_command,
         "code": None,
         "language": None,
