@@ -18,7 +18,9 @@ invent it either.
   `attackevals-ael/ManagedServices/alphv_blackcat` emulation plan, with the
   provenance recorded in the bundle's `x_cti_config`. Committed as-is and
   hand-edited from here on: the generator that built it has been removed, and
-  the two libraries it walked were never vendored.
+  the two libraries it walked were never vendored. Its `x_cti_model` and
+  `x_cti_provider` keys still name that generator, so they are history, not a
+  path to anything you can run.
 
 ## What is actually scored
 
@@ -32,11 +34,21 @@ Both consumers read exactly one thing from the bundle, the ATT&CK
 - [`tests/test_fusion_recall.py`](../../tests/test_fusion_recall.py) splits
   the report in half and checks that fusing both halves beats either alone.
 
-The bundle also carries `software`, `tool`, `infrastructure`, `user-account`,
-`malware` and `relationship` objects. Nothing reads them, and the pipeline
-cannot produce them: `cti_pipeline_stage2.py` emits only `identity`,
-`threat-actor` and `attack-pattern`. They are retained as a record of what the
-source emulation plan asserted.
+Nothing reads the other 103 objects. `convert_ir_to_stix` emits exactly three
+types, `threat-actor`, `attack-pattern` and `observed-data`, so none of the
+rest can be reproduced. The full census is 39 `relationship`, 34
+`attack-pattern`, 25 `software`, 15 `tool`, 11 `infrastructure`, 6
+`user-account`, 3 `identity`, 2 `malware`, 1 `threat-actor` and 1
+`x-cti-ae-context`. They are retained as a record of what the source emulation
+plan asserted.
+
+Two caveats on that residue. `validate_bundle` reports 26 errors against this
+file, because neither `software` (25 objects) nor the custom
+`x-cti-ae-context` (1) is in `ALLOWED_STIX_TYPES`. And `x-cti-ae-context` holds
+the evaluation range's subnets, host paths and account names, which the Scope
+note below says the pipeline does not carry. Nothing reads either type and
+nothing can rebuild them, so both are candidates for deletion whenever someone
+wants the fixture to validate.
 
 ## Adding a stick
 

@@ -11,5 +11,4 @@ exclude =
     venv,
     .venv,
     data,
-    app/utilities/data,
     app/utilities/cti_taxonomy

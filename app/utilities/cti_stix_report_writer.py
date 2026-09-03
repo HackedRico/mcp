@@ -25,16 +25,28 @@ def render_section(title: str, lines: list) -> str:
 
 
 def _hash_lines(observed: dict) -> list:
-    """One line per hash on each SCO the observed-data wraps."""
+    """One line per hash on each SCO the observed-data wraps.
+
+    Type-guarded because the sole caller sits in Stage 2's unguarded per-IR
+    loop: an unexpected shape here would abort the whole batch after the
+    bundles are already on disk, rather than skip one line.
+    """
+    scos = observed.get("objects")
+    if not isinstance(scos, dict):
+        return []
+
     out = []
-    for sco in (observed.get("objects") or {}).values():
-        for algo, digest in (sco.get("hashes") or {}).items():
+    for sco in scos.values():
+        hashes = sco.get("hashes") if isinstance(sco, dict) else None
+        if not isinstance(hashes, dict):
+            continue
+        for algo, digest in hashes.items():
             out.append(f"{algo}: {digest}  ({observed.get('id')})")
     return out
 
 
 def render_stix_report(bundle: dict, ir_name: str) -> str:
-    objects = bundle.get("objects", [])
+    objects = bundle.get("objects") or []
     now = datetime.datetime.now(datetime.UTC).isoformat().replace("+00:00", "Z")
 
     actors = []
