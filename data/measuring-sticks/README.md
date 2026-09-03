@@ -49,13 +49,12 @@ and nothing can rebuild them, so both are candidates for deletion whenever
 someone wants the fixture to validate.
 
 The second caveat is that the fixture carries evaluation-range detail the Scope
-note below says the pipeline does not carry, and deleting those two types does
-not remove it. `x-cti-ae-context` holds the range's subnets, file paths,
-registry keys and file extensions. The range's account names sit in the 6
-`user-account` objects, whose `x_cti_evidence` still quotes the plaintext
-credential even where `x_cti_password_provenance` reads `redacted`, and its
-hostnames sit in the 11 `infrastructure` objects. Both types validate, so
-clearing the 26 errors leaves every one of them in place. Nothing reads them.
+note below says the pipeline does not carry. `x-cti-ae-context` holds the
+range's subnets, file paths and registry keys; its account names, hostnames,
+addresses and domain are spread across the `user-account`, `infrastructure` and
+`identity` objects. Deleting `software` and `x-cti-ae-context` clears the 26
+errors and takes the first group with it. The rest validate, so they stay.
+Nothing reads any of it.
 
 ## Adding a stick
 
