@@ -2,8 +2,13 @@
 
 from plugins.mcp.app.utilities.cti_linguistics import extract_hashes
 from plugins.mcp.app.utilities.cti_mitre_extract import hashes_to_stix_observed_data
-from plugins.mcp.app.utilities.cti_stix_builders import make_bundle
+from plugins.mcp.app.utilities.cti_stix_builders import (
+    make_attack_pattern,
+    make_bundle,
+    make_threat_actor,
+)
 from plugins.mcp.app.utilities.cti_stix_report_writer import render_stix_report
+from plugins.mcp.app.utilities.cti_taxonomy_loader import load_mitre_taxonomy
 from plugins.mcp.app.utilities.cti_stix_validation import (
     valid_stix_id,
     valid_uuid4,
@@ -45,8 +50,8 @@ def _headings(report: str) -> list:
 
 
 def _section(report: str, title: str) -> list:
-    """The body lines under one heading. render_section separates sections with
-    a blank line, so the first one after the heading ends the body."""
+    """The body lines under one heading. render_stix_report joins sections that
+    each end in a newline, so a blank line closes every body, the last included."""
     lines = report.splitlines()
     start = lines.index(f"{title}:") + 1
     return [line.strip() for line in lines[start:lines.index("", start)]]
@@ -66,22 +71,34 @@ class TestRenderStixReport:
         ]
         assert _section(report, "Observed File Hashes") == ["(none)"]
 
-    def test_renders_each_object_under_its_own_heading(self, sample_stix_bundle):
+    def test_renders_each_object_under_its_own_heading(self):
         """Bound to the section rather than to the whole report: both branches of
         the dispatch loop render byte-identical text, so a swapped append target
-        is invisible to any assertion that only searches the report."""
-        report = render_stix_report(sample_stix_bundle, "test.json")
+        is invisible to any assertion that only searches the report. Two
+        attack-patterns, because one cannot fail a writer that renders only the
+        first of a type, and every real bundle carries many."""
+        taxonomy = load_mitre_taxonomy()
+        objects = [
+            make_threat_actor({"name": "TestActor"}),
+            make_attack_pattern({"id": "T1486"}, taxonomy),
+            make_attack_pattern({"id": "T1490"}, taxonomy),
+        ]
+        assert all(objects), "a builder returned nothing to render"
+
+        bundle = make_bundle(objects)
+        report = render_stix_report(bundle, "test.json")
         headings = {
             "threat-actor": "Threat Actors",
             "attack-pattern": "Attack Patterns (TTPs)",
         }
 
         expected = {title: [] for title in headings.values()}
-        for obj in sample_stix_bundle["objects"]:
+        for obj in bundle["objects"]:
             title = headings.get(obj["type"])
-            assert title, f"fixture gained a {obj['type']}; give it a heading here"
+            assert title, f"bundle gained a {obj['type']}; give it a heading here"
             expected[title].append(f"- {obj['name']}  ({obj['id']})")
 
+        assert len(expected["Attack Patterns (TTPs)"]) == 2
         for title, lines in expected.items():
             assert _section(report, title) == lines
 
@@ -96,11 +113,14 @@ class TestRenderStixReport:
         bundle = make_bundle(hashes_to_stix_observed_data(hashes))
         report = render_stix_report(bundle, "test.json")
 
-        assert sorted(_section(report, "Observed File Hashes")) == sorted(
+        # Unsorted: render order tracks bundle order, so the .txt lines up with
+        # the .json an analyst diffs it against.
+        assert _section(report, "Observed File Hashes") == [
             f"- {h['hash_type']}: {h['hash']}  ({observed['id']})"
             for h, observed in zip(hashes, bundle["objects"])
-        )
-        assert f"Total STIX Objects: {len(bundle['objects'])}" in report
+        ]
+        # Whole line, not a substring: "...: 2" is a prefix of "...: 22".
+        assert f"Total STIX Objects: {len(bundle['objects'])}" in report.splitlines()
 
     def test_skips_malformed_observed_data_without_losing_the_rest(self):
         """The guards in _hash_lines exist so one bad shape costs a line, not the
@@ -123,9 +143,18 @@ class TestRenderStixReport:
              "objects": {"0": {"type": "file"}}},
             {"type": "observed-data", "id": "observed-data--hashes-not-a-dict",
              "objects": {"0": {"type": "file", "hashes": []}}},
+            # A bad SCO must skip only itself, so the good sibling beside it
+            # still renders. `break` or an early return would drop it.
+            {"type": "observed-data", "id": "observed-data--bad-sco-then-good",
+             "objects": {"0": {"type": "file", "hashes": []},
+                         "1": {"type": "file", "hashes": {"MD5": "d" * 32}}}},
         ]
 
-        report = render_stix_report(make_bundle(malformed + good), "test.json")
+        bundle = make_bundle(malformed + good)
+        report = render_stix_report(bundle, "test.json")
         assert _section(report, "Observed File Hashes") == [
-            f"- SHA1: {digest}  ({good[0]['id']})"
+            f"- MD5: {'d' * 32}  (observed-data--bad-sco-then-good)",
+            f"- SHA1: {digest}  ({good[0]['id']})",
         ]
+        # Counts the bundle, not the rendered lines: 6 objects, 2 hash lines.
+        assert f"Total STIX Objects: {len(bundle['objects'])}" in report.splitlines()
